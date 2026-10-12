@@ -1,0 +1,54 @@
+name: Build Sculpt AutoTone macOS
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 55
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Check build environment
+        run: |
+          sw_vers
+          xcodebuild -version
+          cmake --version
+
+      - name: Configure universal macOS app
+        run: |
+          cmake -S . -B build -G Xcode \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
+            -DBUILD_NAMCORE=ON \
+            -DBUILD_RTNEURAL=ON
+
+      - name: Compile Sculpt AutoTone
+        run: cmake --build build --config Release --parallel 3
+
+      - name: Package macOS app
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP=$(find build -type d -name 'Sculpt AutoTone.app' -print -quit)
+          if [[ -z "$APP" ]]; then
+            echo "Unable to find built application" >&2
+            find build -name '*.app' -print
+            exit 1
+          fi
+          codesign --force --deep --sign - "$APP"
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent "$APP" dist/Sculpt_AutoTone_Beta_Mac_Universal.zip
+          ls -lh dist/Sculpt_AutoTone_Beta_Mac_Universal.zip
+
+      - name: Upload Mac app
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sculpt-AutoTone-Mac-App
+          path: dist/Sculpt_AutoTone_Beta_Mac_Universal.zip
+          if-no-files-found: error
