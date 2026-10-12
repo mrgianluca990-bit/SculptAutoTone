@@ -1,0 +1,14 @@
+SCULPT AUTO TONE 0.1 — Build macOS tramite GitHub Actions
+
+Questo ZIP NON e' una .app compilata. Contiene i sorgenti e il workflow per fare la build su un Mac GitHub.
+
+1. Su GitHub crea un NUOVO repository chiamato SculptAutoTone (per non modificare SculptChannel o SculptBus).
+2. Carica NELLA ROOT del repository tutti i file e le cartelle contenuti nella cartella SculptAutoTone_Beta01.
+   Importante: la cartella nascosta .github/workflows/build-macos.yml deve essere presente e GitHub deve riconoscerla.
+3. Al push su main si avvia automaticamente la build su macos-15; in alternativa Actions > Build Sculpt AutoTone macOS > Run workflow.
+4. Quando il workflow e' verde, apri la pagina della build e scarica l'artifact Sculpt-AutoTone-Mac-App.
+5. Estrai il file .zip interno per ottenere Sculpt AutoTone.app.
+
+L'app e' firmata ad hoc ma non notarizzata. macOS potrebbe chiedere l'autorizzazione tramite Impostazioni > Privacy e sicurezza.
+
+La riuscita della compilazione dell'app NON e' stata verificata qui su macOS. Se il workflow fallisce, il log GitHub indica il punto da correggere. E' un vero prototipo audio sperimentale; NON un prodotto stabile o un selettore intelligente validato.

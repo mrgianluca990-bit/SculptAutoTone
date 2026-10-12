@@ -1,0 +1,13 @@
+SCULPT AUTO TONE — TEST BETA 0.1
+
+1) Che Mac usi? (modello / Intel oppure Apple Silicon)
+2) Quale interfaccia audio e buffer? (es. SSL, 128 campioni, 48 kHz)
+3) Quanti NAM sono stati caricati? L'app parte senza errori?
+4) Senti la chitarra elaborata? Il cabinet IR funziona?
+5) Dopo qualche secondo si cambia da sola la capture?
+6) Il cambio provoca click/interruzioni o salti di volume?
+7) I NAM scelti hanno senso per il modo in cui stai suonando?
+8) Dopo LOCK, il suono rimane davvero fisso?
+9) Qual è il singolo cambiamento più importante da fare?
+
+Non inviare file audio, screenshot personali o dati privati salvo tua scelta.

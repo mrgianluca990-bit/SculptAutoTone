@@ -1,0 +1,30 @@
+SCULPT AUTO TONE — BETA 0.1 (MAC)
+
+QUELLO CHE FA:
+Connetti la chitarra alla tua interfaccia audio, carica una cartella
+contenente file .nam e suona. Sculpt misura il livello e l'attacco,
+confronta questi dati con una caratterizzazione approssimativa dei
+profili e passa automaticamente a uno dei NAM caricati.
+Non registra il segnale su disco.
+
+IMPORTANTE:
+Questa è una BETA SORGENTE, non una .app pronta o verificata su Mac.
+La build richiede Mac, Xcode Command Line Tools, CMake, Git e internet
+al primo avvio. Il test di logica C++ è passato, ma la build macOS e
+l'audio con NeuralAudio devono ancora essere verificati sul tuo Mac.
+
+COME COMPILARE:
+1. Installa Xcode Command Line Tools (Terminale: xcode-select --install)
+2. Installa CMake (Homebrew: brew install cmake)
+3. Apri Terminale nella cartella estratta
+4. Scrivi: ./build_mac.command
+
+PRIMA PROVA:
+- Usa cuffie e livello di uscita basso.
+- Seleziona la scheda audio (AUDIO / SSL), 48 kHz, buffer 128/256.
+- Carica 4–8 profili .nam, idealmente clean/crunch/lead.
+- Carica anche una IR cabinet .wav per le capture amp-only.
+- Inizia a suonare e verifica se e come cambia i profili.
+
+Per limiti, approfondimenti e feedback, leggi README.md e
+PROVA_E_FEEDBACK.txt.
