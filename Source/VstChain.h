@@ -73,6 +73,8 @@ public:
         slot.processor = std::move(plugin);
         slot.displayName = chosen->name.isNotEmpty() ? chosen->name : bundle.getFileNameWithoutExtension();
         slot.active.store(true, std::memory_order_release);
+        if (prepared && slot.processor)
+            prepareProcessor(*slot.processor, sampleRateLive, blockSizeLive);
         return true;
 #else
         error = "La build non ha abilitato JUCE_PLUGINHOST_VST3.";
@@ -94,19 +96,7 @@ public:
         blockSizeLive = blockSize;
         for (auto& s : slots) {
             if (!s.processor) continue;
-            auto& p = *s.processor;
-            // First try stereo to accommodate chorus, reverb and delay, then mono if necessary.
-            juce::AudioProcessor::BusesLayout stereo;
-            stereo.inputBuses.add(juce::AudioChannelSet::stereo());
-            stereo.outputBuses.add(juce::AudioChannelSet::stereo());
-            if (!p.setBusesLayout(stereo)) {
-                juce::AudioProcessor::BusesLayout mono;
-                mono.inputBuses.add(juce::AudioChannelSet::mono());
-                mono.outputBuses.add(juce::AudioChannelSet::mono());
-                (void)p.setBusesLayout(mono);
-            }
-            p.setRateAndBufferSizeDetails(sampleRate, blockSize);
-            p.prepareToPlay(sampleRate, blockSize);
+            prepareProcessor(*s.processor, sampleRate, blockSize);
         }
         prepared = true;
     }
@@ -122,7 +112,7 @@ public:
     void process(int i, juce::AudioBuffer<float>& buffer) noexcept {
         if (!valid(i)) return;
         auto& s = slots[static_cast<size_t>(i)];
-        if (!s.processor || !s.active.load(std::memory_order_relaxed) || s.processor->isSuspended()) return;
+        if (!s.processor || !s.active.load(std::memory_order_relaxed)) return;
         const int ins = s.processor->getTotalNumInputChannels();
         const int outs = s.processor->getTotalNumOutputChannels();
         if (outs < 1 || ins < 1 || ins > 2 || outs > 2) return; // Unsupported layouts are safely bypassed.
@@ -152,6 +142,29 @@ public:
             for (const auto& f : items) if (f.hasFileExtension("vst3") && !files.contains(f)) files.add(f);
         }
         return files;
+    }
+
+
+    void prepareProcessor(juce::AudioPluginInstance& p, double sampleRate, int blockSize) {
+        juce::AudioProcessor::BusesLayout stereo;
+        stereo.inputBuses.add(juce::AudioChannelSet::stereo());
+        stereo.outputBuses.add(juce::AudioChannelSet::stereo());
+        bool ok = p.setBusesLayout(stereo);
+        if (!ok) {
+            juce::AudioProcessor::BusesLayout mono;
+            mono.inputBuses.add(juce::AudioChannelSet::mono());
+            mono.outputBuses.add(juce::AudioChannelSet::mono());
+            ok = p.setBusesLayout(mono);
+        }
+        p.enableAllBuses();
+        const int ins = juce::jmax(1, p.getTotalNumInputChannels());
+        const int outs = juce::jmax(1, p.getTotalNumOutputChannels());
+        p.setPlayConfigDetails(ins, outs, sampleRate, blockSize);
+        p.setRateAndBufferSizeDetails(sampleRate, blockSize);
+        p.setNonRealtime(false);
+        p.prepareToPlay(sampleRate, blockSize);
+        p.suspendProcessing(false);
+        p.reset();
     }
 
 private:

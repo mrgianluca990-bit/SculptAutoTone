@@ -62,10 +62,10 @@ public:
         title.setText("SCULPT  /  GUITAR RIG", juce::dontSendNotification);
         title.setFont(juce::Font(juce::FontOptions(27.f, juce::Font::bold)));
         title.setColour(juce::Label::textColourId, kText);
-        subtitle.setText("NAM  /  VST3  /  CAB IR  /  SCULPT CH     •     BETA 0.7", juce::dontSendNotification);
+        subtitle.setText("NAM  /  VST3  /  CAB IR  /  SCULPT CH     •     BETA 0.8", juce::dontSendNotification);
         subtitle.setFont(juce::Font(juce::FontOptions(11.f)));
         subtitle.setColour(juce::Label::textColourId, kWarm);
-        status.setText("Collega la scheda audio, configura VST3 e scegli liberamente una cattura NAM.", juce::dontSendNotification);
+        status.setText("Rig manuale: scegli i tuoi NAM e i tuoi VST3. Host VST3 corretto e impostazioni audio preservate.", juce::dontSendNotification);
         status.setColour(juce::Label::textColourId, kMuted);
         status.setFont(juce::Font(juce::FontOptions(12.5f)));
         current.setText("NESSUN PROFILO", juce::dontSendNotification);
@@ -211,7 +211,7 @@ public:
             if (libraryPage+5 < static_cast<int>(captures.size())) libraryPage+=5;
             timerCallback();
         };
-        modeLabel.setText("●  SELEZIONE NAM MANUALE",juce::dontSendNotification);
+        modeLabel.setText("●  RIG MANUALE",juce::dontSendNotification);
         setSize(1200, 740);
         setAudioChannels(1, 2);
         startTimerHz(10);
@@ -342,11 +342,17 @@ public:
             auto* right = numChannels > 1 ? audio->getWritePointer(1, start + offset) : nullptr;
             const auto* processedL = fxBuffer.getReadPointer(0);
             const auto* processedR = fxBuffer.getReadPointer(1);
+            double outEnergy = 0.0;
             for (int i=0;i<n;++i) {
                 const float gain = masterGain.getNextValue();
-                left[i] = juce::jlimit(-0.85f, 0.85f, processedL[i] * gain);
-                if (right != nullptr) right[i] = juce::jlimit(-0.85f,0.85f,processedR[i]*gain);
+                const float l = juce::jlimit(-0.85f, 0.85f, processedL[i] * gain);
+                const float r = right != nullptr ? juce::jlimit(-0.85f,0.85f,processedR[i]*gain) : l;
+                left[i] = l;
+                if (right != nullptr) right[i] = r;
+                outEnergy += 0.5 * (double(l)*double(l) + double(r)*double(r));
             }
+            outputDb.store(static_cast<float>(20.0*std::log10(
+                std::max(1.e-8, std::sqrt(outEnergy / std::max(1,n)))))), std::memory_order_relaxed);
             for (int ch=2;ch<numChannels;++ch) audio->copyFrom(ch,start+offset,*audio,0,start+offset,n);
             // Level meter only: no dynamics-to-tone inference and no automatic switching.
             double energy=0.0;
@@ -523,117 +529,221 @@ private:
     public:
         explicit RigPanel(GuitarRigWindow& parent) : owner(parent) {
             setOpaque(true);
-            gateLabel.setText("INPUT NOISE GATE  /  FISSO, PRIMA DEI VST3",juce::dontSendNotification);
-            gateLabel.setColour(juce::Label::textColourId,kWarm);
-            gateLabel.setFont(juce::Font(juce::FontOptions(14.f,juce::Font::bold)));
-            addAndMakeVisible(gateLabel);
-            gateBypass.setButtonText("GATE ON");
-            gateBypass.onClick=[this]{owner.gateEnabled.store(!owner.gateEnabled.load());updateLabels();};
-            addAndMakeVisible(gateBypass);
-            threshold.setSliderStyle(juce::Slider::LinearHorizontal);
-            threshold.setTextBoxStyle(juce::Slider::TextBoxRight,false,75,23);
-            threshold.setRange(-85.,-15.,1.);
-            threshold.setValue(owner.gateThresholdDb.load(),juce::dontSendNotification);
-            threshold.setTextValueSuffix(" dB");
-            threshold.onValueChange=[this]{owner.gateThresholdDb.store(static_cast<float>(threshold.getValue()));};
-            addAndMakeVisible(threshold);
-            caption.setText("PRE 1–4  →  NAM  →  IR  →  SCULPT CHANNEL  →  POST 1–4  →  MASTER",juce::dontSendNotification);
-            caption.setColour(juce::Label::textColourId,kMuted);
-            caption.setJustificationType(juce::Justification::centred);
-            caption.setFont(juce::Font(juce::FontOptions(13.f,juce::Font::bold)));
-            addAndMakeVisible(caption);
-            for (int i=0;i<9;++i) {
-                auto& label=labels[static_cast<size_t>(i)];
-                label.setColour(juce::Label::textColourId,kText);
-                label.setFont(juce::Font(juce::FontOptions(12.7f,juce::Font::bold)));
-                label.setMinimumHorizontalScale(0.7f);
+            auto setupLabel = [](juce::Label& l, float size, juce::Colour c, bool bold=true){
+                l.setColour(juce::Label::textColourId, c);
+                l.setFont(juce::Font(juce::FontOptions(size, bold ? juce::Font::bold : juce::Font::plain)));
+            };
+            setupLabel(inputTitle, 14.f, kWarm); inputTitle.setText("01 / INPUT", juce::dontSendNotification); addAndMakeVisible(inputTitle);
+            setupLabel(gateCaption, 11.8f, kMuted, false); gateCaption.setText("Noise Gate fisso prima dei VST3 PRE", juce::dontSendNotification); addAndMakeVisible(gateCaption);
+            setupLabel(inputMeterLabel, 13.5f, kText); inputMeterLabel.setText("Input: -- dBFS", juce::dontSendNotification); addAndMakeVisible(inputMeterLabel);
+            inputSetup.setButtonText("SETUP INPUT"); inputSetup.onClick=[this]{owner.showAudioSettings();}; addAndMakeVisible(inputSetup);
+            gateBypass.setButtonText("GATE ON"); gateBypass.onClick=[this]{owner.gateEnabled.store(!owner.gateEnabled.load()); updateLabels();}; addAndMakeVisible(gateBypass);
+            gateThreshold.setSliderStyle(juce::Slider::LinearHorizontal);
+            gateThreshold.setTextBoxStyle(juce::Slider::TextBoxRight,false,70,22);
+            gateThreshold.setRange(-85.,-15.,1.); gateThreshold.setValue(owner.gateThresholdDb.load(),juce::dontSendNotification);
+            gateThreshold.setTextValueSuffix(" dB"); gateThreshold.onValueChange=[this]{owner.gateThresholdDb.store((float)gateThreshold.getValue());};
+            addAndMakeVisible(gateThreshold);
+
+            setupLabel(preTitle, 14.f, kWarm); preTitle.setText("02 / PRE VST3", juce::dontSendNotification); addAndMakeVisible(preTitle);
+            setupLabel(namTitle, 14.f, kWarm); namTitle.setText("03 / NAM + CAB", juce::dontSendNotification); addAndMakeVisible(namTitle);
+            setupLabel(sculptTitle, 14.f, kWarm); sculptTitle.setText("04 / SCULPT CH", juce::dontSendNotification); addAndMakeVisible(sculptTitle);
+            setupLabel(postTitle, 14.f, kWarm); postTitle.setText("05 / POST VST3", juce::dontSendNotification); addAndMakeVisible(postTitle);
+            setupLabel(outputTitle, 14.f, kWarm); outputTitle.setText("06 / OUTPUT", juce::dontSendNotification); addAndMakeVisible(outputTitle);
+
+            setupLabel(currentNam, 17.f, kText); currentNam.setText("NAM BYPASS / SEGNALE DI", juce::dontSendNotification); addAndMakeVisible(currentNam);
+            setupLabel(irStatus, 11.8f, kMuted, false); irStatus.setText("Cabinet IR: nessuna", juce::dontSendNotification); addAndMakeVisible(irStatus);
+            namSelector.setJustificationType(juce::Justification::centredLeft);
+            namSelector.onChange = [this]{
+                const int id = namSelector.getSelectedId();
+                if (id == 1) owner.selectNam(-1);
+                else if (id > 1) owner.selectNam(id - 2);
+            };
+            addAndMakeVisible(namSelector);
+            loadNam.setButtonText("CARICA NAM"); loadNam.onClick=[this]{owner.chooseNAMFolder();}; addAndMakeVisible(loadNam);
+            prevNam.setButtonText("◀"); prevNam.onClick=[this]{owner.changeNam(-1);}; addAndMakeVisible(prevNam);
+            nextNam.setButtonText("▶"); nextNam.onClick=[this]{owner.changeNam(+1);}; addAndMakeVisible(nextNam);
+            loadIr.setButtonText("CARICA IR"); loadIr.onClick=[this]{owner.chooseIR();}; addAndMakeVisible(loadIr);
+
+            setupLabel(outputMeterLabel, 13.5f, kText); outputMeterLabel.setText("Output: -- dBFS", juce::dontSendNotification); addAndMakeVisible(outputMeterLabel);
+            outputSetup.setButtonText("SETUP OUTPUT"); outputSetup.onClick=[this]{owner.showAudioSettings();}; addAndMakeVisible(outputSetup);
+            outputMasterName.setText("MASTER OUTPUT", juce::dontSendNotification); setupLabel(outputMasterName, 11.8f, kMuted, false); addAndMakeVisible(outputMasterName);
+            masterSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+            masterSlider.setTextBoxStyle(juce::Slider::TextBoxRight,false,70,22);
+            masterSlider.setRange(-60.0, 6.0, 0.5);
+            masterSlider.setDoubleClickReturnValue(true, 0.0);
+            masterSlider.onValueChange=[this]{
+                owner.masterGainDb.store((float)masterSlider.getValue(), std::memory_order_relaxed);
+                updateLabels();
+            };
+            addAndMakeVisible(masterSlider);
+            setupLabel(masterValue, 13.5f, kText); masterValue.setText("0.0 dB", juce::dontSendNotification); addAndMakeVisible(masterValue);
+
+            auto setupSlot = [this](int i, const juce::String& text){
+                auto& label = labels[(size_t)i]; label.setText(text, juce::dontSendNotification);
+                label.setJustificationType(juce::Justification::centredTop);
+                label.setColour(juce::Label::textColourId, kText);
+                label.setFont(juce::Font(juce::FontOptions(12.5f, juce::Font::bold)));
                 addAndMakeVisible(label);
-                auto& load=loads[static_cast<size_t>(i)];
-                load.setButtonText(i==4 ? "SCULPT CH" : "CARICA VST3");
-                load.onClick=[this,i]{owner.showPluginMenu(i);};
-                addAndMakeVisible(load);
-                auto& edit=editors[static_cast<size_t>(i)];
-                edit.setButtonText("EDIT");
-                edit.onClick=[this,i]{owner.openPluginEditor(i);};
-                addAndMakeVisible(edit);
-                auto& bypass=bypasses[static_cast<size_t>(i)];
-                bypass.onClick=[this,i]{owner.vstChain.enable(i,!owner.vstChain.enabled(i));updateLabels();};
-                addAndMakeVisible(bypass);
-                auto& remove=removes[static_cast<size_t>(i)];
-                remove.setButtonText("X");
-                remove.onClick=[this,i]{owner.removeVstSlot(i);updateLabels();};
-                addAndMakeVisible(remove);
-            }
-            hint.setText("Installa i VST3 sul Mac. CARICA apre la lista locale; EDIT apre la GUI originale del plugin. Le modifiche agli slot interrompono brevemente l'audio.",juce::dontSendNotification);
-            hint.setColour(juce::Label::textColourId,kMuted);
-            hint.setFont(juce::Font(juce::FontOptions(11.5f)));
+                auto& preview = previews[(size_t)i];
+                preview.setColour(juce::Label::backgroundColourId, kPanelAlt);
+                preview.setColour(juce::Label::outlineColourId, juce::Colours::white.withAlpha(0.07f));
+                preview.setColour(juce::Label::textColourId, kMuted);
+                preview.setJustificationType(juce::Justification::centred);
+                preview.setFont(juce::Font(juce::FontOptions(11.3f)));
+                addAndMakeVisible(preview);
+                auto& load = loads[(size_t)i]; load.setButtonText(i==4 ? "CARICA SCULPT" : "CARICA"); load.onClick=[this,i]{owner.showPluginMenu(i);}; addAndMakeVisible(load);
+                auto& edit = editors[(size_t)i]; edit.setButtonText("EDIT"); edit.onClick=[this,i]{owner.openPluginEditor(i);}; addAndMakeVisible(edit);
+                auto& bypass = bypasses[(size_t)i]; bypass.onClick=[this,i]{owner.vstChain.enable(i, !owner.vstChain.enabled(i)); updateLabels();}; addAndMakeVisible(bypass);
+                auto& remove = removes[(size_t)i]; remove.setButtonText("X"); remove.onClick=[this,i]{owner.removeVstSlot(i); updateLabels();}; addAndMakeVisible(remove);
+            };
+            for(int i=0;i<4;++i) setupSlot(i, "PRE " + juce::String(i+1));
+            setupSlot(4, "SCULPT CHANNEL");
+            for(int i=5;i<9;++i) setupSlot(i, "POST " + juce::String(i-4));
+
+            hint.setText("Questa vista segue il concept finale: INPUT > PRE > NAM/CAB > SCULPT CH > POST > OUTPUT. La grafica definitiva arriverà dopo.", juce::dontSendNotification);
+            hint.setColour(juce::Label::textColourId, kMuted);
             hint.setJustificationType(juce::Justification::centred);
+            hint.setFont(juce::Font(juce::FontOptions(11.5f)));
             addAndMakeVisible(hint);
-            setSize(1100,750);
-            startTimerHz(2);
+            setSize(1480, 860);
+            startTimerHz(8);
             updateLabels();
         }
         ~RigPanel() override { stopTimer(); }
+
         void paint(juce::Graphics& g) override {
             g.fillAll(kBg);
-            auto drawPanel=[&](int x,int y,int w,int h,const juce::String& text){
-                g.setColour(kPanel); g.fillRoundedRectangle(juce::Rectangle<float>(x,y,w,h),11.f);
-                g.setColour(kAccent.withAlpha(.42f));g.drawRoundedRectangle(juce::Rectangle<float>(x,y,w,h),11.f,1.f);
-                g.setColour(kWarm);g.setFont(juce::Font(juce::FontOptions(14.f,juce::Font::bold)));
-                g.drawText(text,x+18,y+13,w-36,22,juce::Justification::centredLeft);
+            auto section=[&](int x,int y,int w,int h,const juce::String& title){
+                auto r=juce::Rectangle<float>((float)x,(float)y,(float)w,(float)h);
+                g.setColour(kPanel); g.fillRoundedRectangle(r, 14.f);
+                g.setColour(kAccent.withAlpha(0.35f)); g.drawRoundedRectangle(r,14.f,1.f);
+                g.setColour(kWarm); g.setFont(juce::Font(juce::FontOptions(14.f, juce::Font::bold)));
+                g.drawText(title, x+16, y+12, w-32, 22, juce::Justification::centredLeft);
             };
-            drawPanel(16,16,1068,92,"01 / INPUT");
-            drawPanel(16,148,520,403,"02 / PRE NAM   ·   4 VST3");
-            drawPanel(549,148,535,403,"04 / POST NAM / POST SCULPT CH   ·   4 VST3");
-            drawPanel(16,569,1068,106,"03 / SCULPT CHANNEL   ·   DOPO NAM + IR");
-            g.setColour(kMuted);g.setFont(juce::Font(juce::FontOptions(12.f)));
-            g.drawText("NAM + CABINET IR sono gestiti dalla finestra principale.",20,111,1060,28,juce::Justification::centred);
+            section(16,16,190,828,"01 / INPUT");
+            section(220,16,380,828,"02 / PRE VST3");
+            section(614,16,240,828,"03 / NAM + CAB");
+            section(868,16,220,828,"04 / SCULPT CH");
+            section(1102,16,380,828,"05 / POST VST3");
+            section(1496-190,16,174,828,"06 / OUTPUT");
+            auto drawMeter=[&](float x,float y,float w,float db){
+                g.setColour(juce::Colour(0xff34383c));
+                g.fillRoundedRectangle(juce::Rectangle<float>(x,y,w,11.f), 4.f);
+                const float amount=juce::jlimit(0.f,1.f,(db+65.f)/65.f);
+                if(amount>0.002f){
+                    g.setGradientFill(juce::ColourGradient(kGreen,x,y,kWarm,x+w,y,false));
+                    g.fillRoundedRectangle(juce::Rectangle<float>(x,y,w*amount,11.f),4.f);
+                }
+            };
+            drawMeter(34.f, 122.f, 154.f, owner.levelDb.load());
+            drawMeter(1324.f, 122.f, 138.f, owner.outputDb.load());
+            // simple pedal placeholders
+            auto pedal=[&](int x,int y,int w,int h){
+                g.setColour(kPanelAlt); g.fillRoundedRectangle(juce::Rectangle<float>((float)x,(float)y,(float)w,(float)h), 12.f);
+                g.setColour(juce::Colours::white.withAlpha(0.08f)); g.drawRoundedRectangle(juce::Rectangle<float>((float)x,(float)y,(float)w,(float)h), 12.f, 1.f);
+            };
+            for(int i=0;i<4;++i){ int row=i%2, col=i/2; pedal(236 + col*184, 88 + row*344, 168, 320); }
+            pedal(884, 154, 188, 560);
+            for(int i=0;i<4;++i){ int row=i%2, col=i/2; pedal(1118 + col*184, 88 + row*344, 168, 320); }
+            g.setColour(kMuted); g.setFont(juce::Font(juce::FontOptions(10.5f)));
+            g.drawText("INGRESSO",34,92,120,16,juce::Justification::centredLeft);
+            g.drawText("USCITA",1324,92,100,16,juce::Justification::centredLeft);
         }
+
         void resized() override {
-            gateLabel.setBounds(40,54,450,26);
-            gateBypass.setBounds(505,54,114,28);
-            threshold.setBounds(638,51,415,34);
-            caption.setBounds(20,112,1060,30);
-            for(int i=0;i<9;++i){
-                int x= i<4 ? 32 : (i==4 ? 32 : 565);
-                int w= i==4 ? 1028 : (i<4 ? 490 : 503);
-                int y= i<4 ? 200+i*86 : (i==4 ? 607 : 200+(i-5)*86);
-                labels[static_cast<size_t>(i)].setBounds(x+8,y,w/2-8,31);
-                const int right=x+w;
-                loads[static_cast<size_t>(i)].setBounds(right-298,y,111,31);
-                editors[static_cast<size_t>(i)].setBounds(right-181,y,55,31);
-                bypasses[static_cast<size_t>(i)].setBounds(right-121,y,82,31);
-                removes[static_cast<size_t>(i)].setBounds(right-34,y,32,31);
+            inputTitle.setBounds(30,26,120,22);
+            inputSetup.setBounds(30,58,158,30);
+            gateCaption.setBounds(30,96,158,18);
+            inputMeterLabel.setBounds(30,138,158,20);
+            gateBypass.setBounds(30,180,158,30);
+            gateThreshold.setBounds(28,222,162,30);
+
+            const int pedalW = 168, pedalH = 320;
+            for(int i=0;i<4;++i){
+                int row=i%2, col=i/2; int x=236 + col*184, y=88 + row*344;
+                layoutPedal(i, x, y, pedalW, pedalH);
             }
-            hint.setBounds(24,689,1050,35);
+
+            currentNam.setBounds(628,76,212,46);
+            namSelector.setBounds(628,136,212,30);
+            prevNam.setBounds(628,180,44,30);
+            nextNam.setBounds(678,180,44,30);
+            loadNam.setBounds(728,180,112,30);
+            loadIr.setBounds(628,222,212,30);
+            irStatus.setBounds(628,266,212,48);
+
+            layoutPedal(4, 884, 154, 188, 560);
+
+            for(int i=5;i<9;++i){
+                int local = i-5; int row=local%2, col=local/2; int x=1118 + col*184, y=88 + row*344;
+                layoutPedal(i, x, y, pedalW, pedalH);
+            }
+
+            outputTitle.setBounds(1324,26,120,22);
+            outputSetup.setBounds(1324,58,138,30);
+            outputMeterLabel.setBounds(1324,138,138,20);
+            outputMasterName.setBounds(1324,182,138,16);
+            masterSlider.setBounds(1320,212,146,30);
+            masterValue.setBounds(1324,248,138,20);
+            hint.setBounds(30,808,1432,26);
         }
     private:
-        void timerCallback() override {updateLabels();}
+        void layoutPedal(int i, int x, int y, int w, int h){
+            labels[(size_t)i].setBounds(x+10,y+16,w-20,20);
+            previews[(size_t)i].setBounds(x+14,y+44,w-28,120);
+            loads[(size_t)i].setBounds(x+16,y+h-132,w-32,28);
+            editors[(size_t)i].setBounds(x+16,y+h-96,70,28);
+            bypasses[(size_t)i].setBounds(x+94,y+h-96,w-110,28);
+            removes[(size_t)i].setBounds(x+16,y+h-60,w-32,28);
+        }
+        void timerCallback() override { updateLabels(); }
         void updateLabels(){
-            gateBypass.setButtonText(owner.gateEnabled.load()?"GATE ON":"GATE OFF");
+            gateBypass.setButtonText(owner.gateEnabled.load() ? "GATE ON" : "GATE OFF");
+            inputMeterLabel.setText("Input: " + juce::String(owner.levelDb.load(), 1) + " dBFS", juce::dontSendNotification);
+            outputMeterLabel.setText("Output: " + juce::String(owner.outputDb.load(), 1) + " dBFS", juce::dontSendNotification);
+            const float db = owner.masterGainDb.load(std::memory_order_relaxed);
+            masterSlider.setValue(db, juce::dontSendNotification);
+            masterValue.setText(db <= -60.f ? "MUTE" : juce::String(db > 0.f ? "+" : "") + juce::String(db, 1) + " dB", juce::dontSendNotification);
+            const int selected = owner.requestedIndex.load(std::memory_order_relaxed);
+            namSelector.clear(juce::dontSendNotification);
+            namSelector.addItem("BYPASS NAM / DI", 1);
+            for(int i=0;i<(int)owner.captures.size();++i) namSelector.addItem(owner.captures[(size_t)i].name, i+2);
+            namSelector.setSelectedId(selected < 0 ? 1 : selected + 2, juce::dontSendNotification);
+            currentNam.setText(selected >= 0 && selected < (int)owner.captures.size() ? owner.captures[(size_t)selected].name : juce::String("NAM BYPASS / DI"), juce::dontSendNotification);
+            irStatus.setText(owner.irName.isNotEmpty() ? "Cabinet IR: " + owner.irName : "Cabinet IR: nessuna", juce::dontSendNotification);
+            prevNam.setEnabled(selected > 0);
+            nextNam.setEnabled(selected >= 0 && selected < (int)owner.captures.size() - 1);
             for(int i=0;i<9;++i){
-                const auto name=owner.vstChain.name(i);
-                const juce::String prefix= i<4 ? "PRE "+juce::String(i+1) : (i==4 ? "SCULPT CH" : "POST "+juce::String(i-4));
-                auto text=prefix+"  /  "+(name.isNotEmpty()?name:juce::String("VUOTO"));
-                labels[static_cast<size_t>(i)].setText(text,juce::dontSendNotification);
-                editors[static_cast<size_t>(i)].setEnabled(name.isNotEmpty());
-                bypasses[static_cast<size_t>(i)].setEnabled(name.isNotEmpty());
-                removes[static_cast<size_t>(i)].setEnabled(name.isNotEmpty());
-                bypasses[static_cast<size_t>(i)].setButtonText(owner.vstChain.enabled(i)?"ON":"BYPASS");
+                const auto name = owner.vstChain.name(i);
+                previews[(size_t)i].setText(name.isNotEmpty() ? name : juce::String("Anteprima plugin\n(non caricato)"), juce::dontSendNotification);
+                editors[(size_t)i].setEnabled(name.isNotEmpty());
+                bypasses[(size_t)i].setEnabled(name.isNotEmpty());
+                removes[(size_t)i].setEnabled(name.isNotEmpty());
+                bypasses[(size_t)i].setButtonText(owner.vstChain.enabled(i) ? "ON" : "BYPASS");
             }
         }
         GuitarRigWindow& owner;
-        juce::Label gateLabel,caption,hint;
-        juce::TextButton gateBypass;
-        juce::Slider threshold;
-        std::array<juce::Label,9> labels;
-        std::array<juce::TextButton,9> loads,editors,bypasses,removes;
+        juce::Label inputTitle, gateCaption, inputMeterLabel;
+        juce::TextButton inputSetup, gateBypass;
+        juce::Slider gateThreshold;
+        juce::Label preTitle, namTitle, sculptTitle, postTitle, outputTitle;
+        juce::Label currentNam, irStatus;
+        juce::ComboBox namSelector;
+        juce::TextButton loadNam, prevNam, nextNam, loadIr;
+        juce::Label outputMeterLabel, outputMasterName, masterValue;
+        juce::TextButton outputSetup;
+        juce::Slider masterSlider;
+        std::array<juce::Label,9> labels, previews;
+        std::array<juce::TextButton,9> loads, editors, bypasses, removes;
+        juce::Label hint;
     };
 
     void showRigPanel() {
         juce::DialogWindow::LaunchOptions opt;
-        opt.content.setOwned(new RigPanel(*this));
-        opt.dialogTitle = "SCULPT GUITAR RIG  /  VST3 FX";
+        auto* panel = new RigPanel(*this);
+        panel->setSize(1480, 860);
+        opt.content.setOwned(panel);
+        opt.dialogTitle = "SCULPT GUITAR RIG  /  LAYOUT OPERATIVO";
         opt.dialogBackgroundColour = kBg;
         opt.useNativeTitleBar = true;
         opt.escapeKeyTriggersCloseButton = true;
@@ -675,18 +785,20 @@ private:
         if(activePluginEditorSlot==slot){activePluginWindow.reset();activePluginEditorSlot=-1;}
         auto* device=deviceManager.getCurrentAudioDevice();
         const double sr=device?device->getCurrentSampleRate():sampleRateLive.load();
-        shutdownAudio(); // Plugin binaries must never be swapped during audio callbacks.
         juce::String error;
-        const bool loaded=vstChain.load(slot,bundle,sr,kBlock,error);
-        setAudioChannels(1,2);
-        if(loaded) status.setText("VST3 caricato: "+vstChain.name(slot),juce::dontSendNotification);
-        else status.setText("VST3: "+error,juce::dontSendNotification);
+        {
+            const juce::ScopedLock lock(deviceManager.getAudioCallbackLock());
+            const bool loaded=vstChain.load(slot,bundle,sr,kBlock,error);
+            if(loaded) status.setText("VST3 caricato: "+vstChain.name(slot),juce::dontSendNotification);
+            else status.setText("VST3: "+error,juce::dontSendNotification);
+        }
     }
     void removeVstSlot(int slot) {
         if(activePluginEditorSlot==slot){activePluginWindow.reset();activePluginEditorSlot=-1;}
-        shutdownAudio();
-        vstChain.remove(slot);
-        setAudioChannels(1,2);
+        {
+            const juce::ScopedLock lock(deviceManager.getAudioCallbackLock());
+            vstChain.remove(slot);
+        }
         status.setText("Slot VST3 svuotato.",juce::dontSendNotification);
     }
     void openPluginEditor(int slot) {
@@ -747,23 +859,22 @@ private:
     }
 
     void loadModels(const juce::File& folder) {
-        auto* deviceBeforeShutdown = deviceManager.getCurrentAudioDevice();
-        const int sr = static_cast<int>(deviceBeforeShutdown ? deviceBeforeShutdown->getCurrentSampleRate() : 48000);
-        shutdownAudio(); // invariant: models may only be created/destroyed while callback is stopped
-        captures.clear();
+        auto* deviceBeforeLoad = deviceManager.getCurrentAudioDevice();
+        const int sr = static_cast<int>(deviceBeforeLoad ? deviceBeforeLoad->getCurrentSampleRate() : 48000);
+        std::vector<Capture> loadedCaptures;
+        juce::Array<juce::File> files;
         namSelector.clear(juce::dontSendNotification);
         libraryPage=0;
-        juce::Array<juce::File> files;
         if (folder.existsAsFile() && folder.hasFileExtension(".nam")) files.add(folder);
         else files=folder.findChildFiles(juce::File::findFiles, true, "*.nam");
         std::sort(files.begin(), files.end(), [](const auto& a, const auto& b) { return a.getFullPathName() < b.getFullPathName(); });
         NeuralAudio::NeuralModelLoader loader;
         loader.SetDefaultMaxAudioBufferSize(kBlock);
         loader.SetExternalSampleRate(sr);
-        loader.SetAudioInputLevelDBu(12.f); // adjustable in a later beta; not measured from interface
+        loader.SetAudioInputLevelDBu(12.f);
         int fails = 0;
         for (const auto& file : files) {
-            if (captures.size() >= static_cast<size_t>(kMaxModels)) break;
+            if (loadedCaptures.size() >= static_cast<size_t>(kMaxModels)) break;
             try {
                 auto ptr = std::unique_ptr<NeuralAudio::NeuralModel>(loader.CreateFromFile(
                     std::filesystem::path(file.getFullPathName().toStdString())));
@@ -774,15 +885,21 @@ private:
                 e.recommendedInput = ptr->GetRecommendedInputDBAdjustment();
                 e.recommendedOutput = ptr->GetRecommendedOutputDBAdjustment();
                 e.model = std::move(ptr);
-                captures.push_back(std::move(e));
+                loadedCaptures.push_back(std::move(e));
             } catch (const std::exception&) { ++fails; }
         }
-        requestedIndex.store(captures.empty() ? -1 : 0);
+        {
+            const juce::ScopedLock lock(deviceManager.getAudioCallbackLock());
+            captures = std::move(loadedCaptures);
+            requestedIndex.store(captures.empty() ? -1 : 0, std::memory_order_relaxed);
+            activeIndex = requestedIndex.load(std::memory_order_relaxed);
+            fadingFrom = -1;
+            fadeRemaining = 0;
+        }
         namSelector.addItem("BYPASS NAM / SEGNALE DI",1);
         for (int i=0;i<static_cast<int>(captures.size());++i)
             namSelector.addItem(captures[static_cast<size_t>(i)].name,i+2);
         namSelector.setSelectedId(captures.empty()?1:2,juce::dontSendNotification);
-        setAudioChannels(1,2);
         if (captures.empty()) {
             status.setText("Nessun NAM caricato. Il rig resta utilizzabile con il segnale DI e i VST3.",juce::dontSendNotification);
             current.setText("NESSUN PROFILO",juce::dontSendNotification);
@@ -845,7 +962,7 @@ private:
         irLabel.setText(irName.isNotEmpty()?"CABINET IR  /  "+irName:"CABINET IR  /  NON CARICATA",juce::dontSendNotification);
         reasonLabel.setText(hasModel?"NAM: "+captures[static_cast<size_t>(selected)].name
                                      : juce::String("Il segnale DI passa nei VST3 anche senza NAM."),juce::dontSendNotification);
-        modeLabel.setText("●  CONTROLLO MANUALE",juce::dontSendNotification);
+        modeLabel.setText("●  RIG MANUALE",juce::dontSendNotification);
         for (int i=0;i<5;++i) {
             const int index=libraryPage+i;
             const bool visible=index<static_cast<int>(captures.size());
@@ -881,7 +998,7 @@ private:
     std::vector<Capture> captures;
     std::atomic<int> requestedIndex{-1};
     std::atomic<bool> irLoaded{false};
-    std::atomic<float> levelDb{-90.f}, masterGainDb{0.f};
+    std::atomic<float> levelDb{-90.f}, outputDb{-90.f}, masterGainDb{0.f};
     std::atomic<double> sampleRateLive{48000.};
     int activeIndex = -1, fadingFrom = -1, fadeRemaining = 0;
     float lowpassZ = 0.0f;
@@ -907,7 +1024,7 @@ public:
 class SculptApp final : public juce::JUCEApplication {
 public:
     const juce::String getApplicationName() override { return "Sculpt Guitar Rig"; }
-    const juce::String getApplicationVersion() override { return "0.7.0-beta-manual-rig"; }
+    const juce::String getApplicationVersion() override { return "0.8.0-beta-manual-rig-vst3-fixes"; }
     bool moreThanOneInstanceAllowed() override { return false; }
     void initialise(const juce::String&) override {
         mainWindow = std::make_unique<SculptMainWindow>();
