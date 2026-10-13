@@ -273,7 +273,7 @@ private:
     }
 
     void loadModels(const juce::File& folder) {
-        const auto* deviceBeforeShutdown = deviceManager.getCurrentAudioDevice();
+        auto* deviceBeforeShutdown = deviceManager.getCurrentAudioDevice();
         const int sr = static_cast<int>(deviceBeforeShutdown ? deviceBeforeShutdown->getCurrentSampleRate() : 48000);
         shutdownAudio(); // invariant: models may only be created/destroyed while callback is stopped
         captures.clear(); characters.clear(); currentFeedback.clear();
