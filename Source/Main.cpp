@@ -3,6 +3,7 @@
 #include <NeuralAudio/NeuralModel.h>
 #include "VstChain.h"
 #include "GuitarTuner.h"
+#include <BinaryData.h>
 
 #include <array>
 #include <atomic>
@@ -15,33 +16,100 @@
 namespace {
 constexpr int kBlock = 2048;
 constexpr int kMaxModels = 24;
-const juce::Colour kBg(0xff0f1013), kPanel(0xff1a1c21), kPanelAlt(0xff22252a),
-                   kAccent(0xffbd514b), kWarm(0xffd4b18b), kGreen(0xff8fb69b),
-                   kText(0xffe9e7e1), kMuted(0xff96989f);
+const juce::Colour kBg(0xff090c0e), kPanel(0xff17191a), kPanelAlt(0xff232629),
+                   kAccent(0xffff713b), kWarm(0xffe8ae69), kGreen(0xff45d99a),
+                   kText(0xffe9e7df), kMuted(0xffa6a5a0), kCyan(0xff3bd4ef);
+const std::array<juce::Colour, 8> kPedalColours {{
+    juce::Colour(0xffb43729),juce::Colour(0xffcf922d),juce::Colour(0xff1c7cb6),
+    juce::Colour(0xff28824c),juce::Colour(0xff873d9a),juce::Colour(0xff196db1),
+    juce::Colour(0xff159482),juce::Colour(0xff777a7c)}};
 
 // Custom draw: no operating-system default buttons, no downloaded fonts or images.
 class SculptLook final : public juce::LookAndFeel_V4 {
 public:
-    juce::Font getTextButtonFont(juce::TextButton&, int buttonHeight) override {
-        return juce::Font(juce::FontOptions(buttonHeight >= 42 ? 13.0f : 11.5f, juce::Font::bold));
+    juce::Font getTextButtonFont(juce::TextButton&, int h) override {
+        return juce::Font(juce::FontOptions(h >= 34 ? 11.5f : 10.5f, juce::Font::bold));
+    }
+    juce::Font getComboBoxFont(juce::ComboBox&) override {
+        return juce::Font(juce::FontOptions(12.5f, juce::Font::bold));
     }
     void drawButtonBackground(juce::Graphics& g, juce::Button& b, const juce::Colour&,
-                              bool hovered, bool down) override {
-        const auto r = b.getLocalBounds().toFloat().reduced(1.0f);
-        const bool active = b.getToggleState();
-        auto fill = active ? juce::Colour(0xff34483e) : kPanelAlt;
-        if (hovered) fill = fill.brighter(0.10f);
-        if (down) fill = fill.brighter(0.15f);
-        g.setColour(fill);
-        g.fillRoundedRectangle(r, 8.0f);
-        g.setColour(active ? kGreen.withAlpha(0.68f) : juce::Colours::white.withAlpha(0.09f));
-        g.drawRoundedRectangle(r, 8.0f, 1.0f);
+                              bool hover, bool pressed) override {
+        auto area=b.getLocalBounds().toFloat().reduced(1.3f);
+        const bool active=b.getToggleState();
+        const auto caption=b.getButtonText().toUpperCase();
+        const bool special= caption.contains("TAP") || caption=="SALVA" ||
+                            caption.contains("TUNER ON") || caption=="GATE ON";
+        const auto edge=active || special ? kWarm : juce::Colour(0xff596068);
+        auto top=juce::Colour(0xff303235);
+        if (active) top=juce::Colour(0xff473122);
+        if (hover) top=top.brighter(0.15f);
+        if (pressed) top=top.darker(0.2f);
+        g.setGradientFill(juce::ColourGradient(top,area.getX(),area.getY(),kBg,area.getX(),area.getBottom(),false));
+        g.fillRoundedRectangle(area,5.f);
+        g.setColour(edge.withAlpha(active || special ? 0.72f : 0.43f));
+        g.drawRoundedRectangle(area,5.f,1.f);
+        g.setColour(juce::Colours::white.withAlpha(0.12f));
+        g.drawLine(area.getX()+5.f,area.getY()+2.f,area.getRight()-5.f,area.getY()+2.f,0.6f);
     }
-    void drawButtonText(juce::Graphics& g, juce::TextButton& b, bool, bool) override {
+    void drawButtonText(juce::Graphics& g, juce::TextButton& b, bool,bool) override {
+        g.setColour(b.isEnabled() ? (b.getToggleState()?kWarm:kText) : kMuted.withAlpha(.5f));
+        g.setFont(getTextButtonFont(b,b.getHeight()));
+        g.drawFittedText(b.getButtonText(),b.getLocalBounds().reduced(4,2),juce::Justification::centred,1,0.75f);
+    }
+    void drawComboBox(juce::Graphics& g, int w,int h,bool,
+                      int,int,int,int,juce::ComboBox& box) override {
+        auto r=juce::Rectangle<float>(0.f,0.f,(float)w,(float)h).reduced(1.f);
+        g.setGradientFill(juce::ColourGradient(juce::Colour(0xff353839),0.f,0.f,
+                                                juce::Colour(0xff12171a),0.f,(float)h,false));
+        g.fillRoundedRectangle(r,5.f);
+        g.setColour(box.hasKeyboardFocus(false)?kWarm.withAlpha(.8f):juce::Colour(0xff849098).withAlpha(.65f));
+        g.drawRoundedRectangle(r,5.f,1.f);
+        const auto x=(float)w-19.f,y=(float)h/2.f;
+        juce::Path arrow;arrow.startNewSubPath(x-5,y-2);arrow.lineTo(x,y+3);arrow.lineTo(x+5,y-2);
+        g.setColour(kText);g.strokePath(arrow,juce::PathStrokeType(1.7f));
+    }
+    void drawRotarySlider(juce::Graphics& g,int x,int y,int w,int h,float pos,
+                          float start,float end,juce::Slider& slider) override {
+        const float size=juce::jmin((float)w,(float)h)*0.78f;
+        const float cx=(float)x+w*0.5f,cy=(float)y+h*0.50f,r=size*0.5f;
+        g.setColour(juce::Colours::black.withAlpha(0.58f));
+        g.fillEllipse(cx-r-3.f,cy-r-1.f,size+6.f,size+6.f);
+        juce::Path arc;arc.addCentredArc(cx,cy,r+5.f,r+5.f,0.f,start,start+(end-start)*pos,true);
+        g.setColour(slider.isEnabled()?kAccent:kMuted);
+        g.strokePath(arc,juce::PathStrokeType(3.4f,juce::PathStrokeType::curved,juce::PathStrokeType::rounded));
+        g.setGradientFill(juce::ColourGradient(juce::Colour(0xff90928e),cx-r,cy-r,
+                                               juce::Colour(0xff15191a),cx+r,cy+r,false));
+        g.fillEllipse(cx-r,cy-r,size,size);
+        g.setColour(juce::Colour(0xff101213));g.drawEllipse(cx-r+1,cy-r+1,size-2,size-2,1.6f);
+        g.setGradientFill(juce::ColourGradient(juce::Colour(0xff535655),cx-r/2,cy-r,
+                                               juce::Colour(0xff141618),cx+r/2,cy+r,false));
+        g.fillEllipse(cx-r+5.f,cy-r+5.f,size-10.f,size-10.f);
+        const float a=start+(end-start)*pos;
+        const float len=r*.67f;
         g.setColour(kText);
-        g.setFont(getTextButtonFont(b, b.getHeight()));
-        g.drawFittedText(b.getButtonText(), b.getLocalBounds().reduced(8, 4),
-                         juce::Justification::centred, 1, 0.78f);
+        g.drawLine(cx+std::sin(a)*r*.22f,cy-std::cos(a)*r*.22f,
+                   cx+std::sin(a)*len,cy-std::cos(a)*len,2.8f);
+        g.setColour(juce::Colours::white.withAlpha(0.07f));g.drawEllipse(cx-r+6.f,cy-r+6.f,size-12.f,size-12.f,.7f);
+    }
+    void drawLinearSlider(juce::Graphics& g,int x,int y,int w,int h,float sliderPos,
+                          float,float,juce::Slider::SliderStyle style,juce::Slider&) override {
+        const bool vertical=style==juce::Slider::LinearVertical;
+        auto bar=vertical?juce::Rectangle<float>((float)x+w/2.f-5.f,(float)y+8.f,10.f,(float)h-16.f)
+                         :juce::Rectangle<float>((float)x+5.f,(float)y+h/2.f-4.f,(float)w-10.f,8.f);
+        g.setColour(juce::Colour(0xff08090a));g.fillRoundedRectangle(bar,4.f);
+        g.setColour(juce::Colour(0xff494d4e));g.drawRoundedRectangle(bar,4.f,1.f);
+        if (vertical){
+            const float fillTop=juce::jlimit(bar.getY(),bar.getBottom(),sliderPos);
+            g.setColour(kAccent);g.fillRoundedRectangle(juce::Rectangle<float>(bar.getX()+2.f,fillTop,bar.getWidth()-4.f,bar.getBottom()-fillTop),2.f);
+        }else{
+            const float fillRight=juce::jlimit(bar.getX(),bar.getRight(),sliderPos);
+            g.setColour(kCyan);g.fillRoundedRectangle(juce::Rectangle<float>(bar.getX()+2.f,bar.getY()+2.f,
+                                         juce::jmax(0.f,fillRight-bar.getX()-2.f),bar.getHeight()-4.f),2.f);
+        }
+        const float sx=vertical?bar.getCentreX():sliderPos,sy=vertical?sliderPos:bar.getCentreY();
+        g.setColour(juce::Colours::black.withAlpha(.7f));g.fillEllipse(sx-10.f,sy-10.f,20.f,20.f);
+        g.setColour(vertical?kText:kCyan);g.fillEllipse(sx-7.f,sy-7.f,14.f,14.f);
     }
 };
 
@@ -64,7 +132,7 @@ public:
         title.setText("SCULPT  /  GUITAR RIG", juce::dontSendNotification);
         title.setFont(juce::Font(juce::FontOptions(27.f, juce::Font::bold)));
         title.setColour(juce::Label::textColourId, kText);
-        subtitle.setText("NAM  /  VST3  /  CAB IR  /  SCULPT CH     •     BETA 1.2", juce::dontSendNotification);
+        subtitle.setText("NAM  /  VST3  /  CAB IR  /  SCULPT CH     •     BETA 1.3", juce::dontSendNotification);
         subtitle.setFont(juce::Font(juce::FontOptions(11.f)));
         subtitle.setColour(juce::Label::textColourId, kWarm);
         status.setText("Rig manuale: scegli i tuoi NAM e i tuoi VST3. Host VST3 corretto e impostazioni audio preservate.", juce::dontSendNotification);
@@ -160,7 +228,7 @@ public:
         rigButton.setColour(juce::TextButton::textColourOffId, kText);
         rigButton.onClick = [this] { showRigPanel(); };
         addAndMakeVisible(rigButton);
-        audioButton.setButtonText("CONFIGURA AUDIO");
+        audioButton.setButtonText("SETUP AUDIO");
         folderButton.setButtonText("CARICA NAM / CARTELLA");
         irButton.setButtonText("CARICA CABINET IR");
         previousNamButton.setButtonText("◀ NAM");
@@ -430,27 +498,40 @@ public:
 
     void paint(juce::Graphics& g) override {
         g.fillAll(kBg);
-        const float footerY=(float)getHeight()-106.f;
-        g.setColour(kPanel);g.fillRect(0,(int)footerY,getWidth(),106);
-        g.setColour(kAccent.withAlpha(0.55f));g.drawLine(0,footerY,(float)getWidth(),footerY,1.5f);
+        const float yy=(float)getHeight()-108.f;
+        auto frame=juce::Rectangle<float>(10.f,yy+2.f,(float)getWidth()-20.f,98.f);
+        g.setGradientFill(juce::ColourGradient(juce::Colour(0xff252323),10.f,yy,
+                            juce::Colour(0xff101112),10.f,yy+105.f,false));
+        g.fillRoundedRectangle(frame,10.f);
+        g.setColour(kWarm.withAlpha(.58f));g.drawRoundedRectangle(frame,10.f,1.f);
+        const int pad=18,gap=8,tile=(getWidth()-2*pad-4*gap)/5;
+        for(int i=0;i<5;++i){
+            const int x=pad+i*(tile+gap);
+            auto r=juce::Rectangle<float>((float)x,(float)getHeight()-81.f,(float)tile,72.f);
+            g.setGradientFill(juce::ColourGradient(juce::Colour(0xff272828),r.getX(),r.getY(),
+                                                  juce::Colour(0xff121415),r.getX(),r.getBottom(),false));
+            g.fillRoundedRectangle(r,6.f);
+            g.setColour(juce::Colour(0xff686159).withAlpha(.38f));g.drawRoundedRectangle(r,6.f,1.f);
+            g.setColour(kAccent);g.fillEllipse(r.getX()+8.f,r.getY()+10.f,8.f,8.f);
+        }
     }
 
     void resized() override {
         const auto bounds = getLocalBounds();
-        constexpr int bankHeight = 106;
+        constexpr int bankHeight = 108;
         rigViewport.setBounds(bounds.withTrimmedBottom(bankHeight));
         if (rigPanel != nullptr)
-            rigPanel->setSize(juce::jmax(1460, bounds.getWidth()),
-                              juce::jmax(775, bounds.getHeight()-bankHeight));
+            rigPanel->setSize(juce::jmax(1510, bounds.getWidth()),
+                              juce::jmax(824, bounds.getHeight()-bankHeight));
         const int footerTop=bounds.getBottom()-bankHeight;
-        quickTitle.setBounds(22,footerTop+4,700,16);
+        quickTitle.setBounds(24,footerTop+8,700,17);
         const int pad=18, gap=8;
         const int tile=(bounds.getWidth()-2*pad-4*gap)/5;
         for(int i=0;i<5;++i){
             const int x=pad+i*(tile+gap);
-            quickNames[(size_t)i].setBounds(x+4,footerTop+21,tile-8,19);
-            quickRecall[(size_t)i].setBounds(x,footerTop+46,(tile*2)/3-4,38);
-            quickStore[(size_t)i].setBounds(x+(tile*2)/3,footerTop+46,tile/3,38);
+            quickNames[(size_t)i].setBounds(x+22,footerTop+32,tile-30,17);
+            quickRecall[(size_t)i].setBounds(x+8,footerTop+54,(tile*2)/3-4,32);
+            quickStore[(size_t)i].setBounds(x+(tile*2)/3+5,footerTop+54,tile/3-12,32);
         }
         if (audioSetupOverlay != nullptr) {
             const int width = juce::jmin(600, juce::jmax(430, bounds.getWidth()-48));
@@ -477,6 +558,13 @@ private:
     };
 
     class RigPanel final : public juce::Component, private juce::Timer {
+        // Transparent hit-targets make the hardware-themed footswitches and
+        // plugin mini-displays respond without painting opaque widgets over artwork.
+        class InvisibleButton final : public juce::Button {
+        public:
+            InvisibleButton() : juce::Button("Rack hardware control") {}
+            void paintButton(juce::Graphics&, bool, bool) override {}
+        };
     public:
         explicit RigPanel(GuitarRigWindow& parent): owner(parent) {
             setOpaque(true);
@@ -487,9 +575,15 @@ private:
                 l.setMinimumHorizontalScale(0.68f);
                 addAndMakeVisible(l);
             };
-            label(brand,"SCULPT / GUITAR RIG",24.f,kText);
-            label(subtitle,"INPUT  /  TUNER  /  PRE VST3  /  SCULPT CH  /  NAM/CAB  /  POST VST3",11.5f,kWarm);
+            label(brand,"SCULPT GUITAR RIG",25.f,kText);
+            label(subtitle,"Standalone NAM + VST3 Rig",11.5f,kMuted);
             label(status,"",12.f,kMuted);
+            label(inputDeviceInfo,"Dispositivo: configurazione audio",11.5f,kText);
+            label(outputDeviceInfo,"Dispositivo: configurazione audio",11.5f,kText);
+            label(inputPortInfo,"INPUT  /  canale selezionato",10.6f,kMuted);
+            label(outputPortInfo,"OUTPUT  /  canali selezionati",10.6f,kMuted);
+            inputDeviceInfo.setJustificationType(juce::Justification::centred);
+            outputDeviceInfo.setJustificationType(juce::Justification::centred);
             label(inMeter,"-90.0 dBFS",15.f,kGreen);
             label(outMeter,"-90.0 dBFS",15.f,kGreen);
             label(namName,"NAM: BYPASS",15.f,kText);
@@ -549,27 +643,27 @@ private:
             addAndMakeVisible(presetNameEditor);
             presetSave.setButtonText("SALVA");presetSave.onClick=[this]{savePreset();};
             addAndMakeVisible(presetSave);
-            presetRefresh.setButtonText("↻");presetRefresh.setTooltip("Aggiorna l'elenco preset");
+            presetRefresh.setButtonText("⟳");presetRefresh.setTooltip("Aggiorna l'elenco preset");
             presetRefresh.onClick=[this]{refreshPresets(true);};
             addAndMakeVisible(presetRefresh);
             refreshPresets(true);
 
-            inputSetup.setButtonText("SETUP AUDIO ▾");
-            outputSetup.setButtonText("SETUP AUDIO ▾");
+            inputSetup.setButtonText("SETUP AUDIO & MIDI  ›");
+            outputSetup.setButtonText("SETUP AUDIO & MIDI  ›");
             inputSetup.onClick = [this] { owner.showAudioSettings(); };
             outputSetup.onClick = [this] { owner.showAudioSettings(); };
             addAndMakeVisible(inputSetup); addAndMakeVisible(outputSetup);
             gateBypass.setButtonText("GATE ON");
             gateBypass.onClick = [this] { owner.gateEnabled.store(!owner.gateEnabled.load()); updateLabels(); };
             addAndMakeVisible(gateBypass);
-            gateThreshold.setSliderStyle(juce::Slider::LinearHorizontal);
-            gateThreshold.setTextBoxStyle(juce::Slider::TextBoxBelow,false,64,18);
+            gateThreshold.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+            gateThreshold.setTextBoxStyle(juce::Slider::TextBoxBelow,false,80,20);
             gateThreshold.setTextValueSuffix(" dB");
             gateThreshold.setRange(-85.,-15.,1.);
             gateThreshold.setValue(owner.gateThresholdDb.load(),juce::dontSendNotification);
             gateThreshold.onValueChange = [this]{owner.gateThresholdDb.store((float)gateThreshold.getValue());};
             addAndMakeVisible(gateThreshold);
-            masterSlider.setSliderStyle(juce::Slider::LinearVertical);
+            masterSlider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
             masterSlider.setTextBoxStyle(juce::Slider::NoTextBox,false,0,0);
             masterSlider.setRange(-60.,6.,.5);
             masterSlider.setDoubleClickReturnValue(true,0.0);
@@ -630,6 +724,24 @@ private:
                 };
                 menu.setSelectedId(1,juce::dontSendNotification);
                 addAndMakeVisible(menu);
+                if (i != VstChain::sculptSlot) {
+                    auto& foot = footswitches[(size_t)i];
+                    foot.setTooltip("Footswitch: attiva / bypassa il VST3 caricato");
+                    foot.onClick=[this,index]{
+                        if(owner.vstChain.get(index)!=nullptr){
+                            owner.vstChain.enable(index,!owner.vstChain.enabled(index));
+                            updateLabels();
+                        }
+                    };
+                    addAndMakeVisible(foot);
+                    auto& preview = previewButtons[(size_t)i];
+                    preview.setTooltip("Anteprima rack: clicca per aprire l'editor VST3 (o caricare un plugin)");
+                    preview.onClick=[this,index]{
+                        if(owner.vstChain.get(index)!=nullptr)owner.openPluginEditor(index);
+                        else owner.showPluginMenu(index);
+                    };
+                    addAndMakeVisible(preview);
+                }
                 auto& edit=editors[(size_t)i]; edit.setButtonText("EDIT"); edit.onClick=[this,index]{owner.openPluginEditor(index);}; addAndMakeVisible(edit);
                 auto& on=power[(size_t)i]; on.setButtonText("ON/OFF"); on.onClick=[this,index]{
                     if (index == VstChain::sculptSlot) return;
@@ -659,7 +771,7 @@ private:
             variation.setButtonText("VARIATION OFF");
             variation.onClick = [this] { setSculptVariation(); };
             addAndMakeVisible(variation);
-            setSize(1580,890);
+            setSize(1580,860);
             startTimerHz(6);
             updateLabels();
         }
@@ -667,135 +779,242 @@ private:
 
         void paint(juce::Graphics& g) override {
             g.fillAll(kBg);
-            auto top=juce::Rectangle<float>(0,0,(float)getWidth(),88.f);
-            g.setGradientFill(juce::ColourGradient(kPanelAlt,0,0,kBg,0,88,false));
-            g.fillRect(top);
-            g.setColour(kAccent);g.fillRoundedRectangle(juce::Rectangle<float>(18.f,16.f,5.f,43.f),2.f);
-            auto headings=std::array<juce::String,6>{{"01 / INPUT","02 / PRE VST3","03 / SCULPT CH (FISSO)","04 / NAM / CAB","05 / POST VST3","06 / OUTPUT"}};
-            for(size_t i=0;i<sections.size();++i){
-                auto r=sections[i].toFloat();
+            g.setGradientFill(juce::ColourGradient(juce::Colour(0xff212426),0.f,0.f,
+                                                   kBg,0.f,80.f,false));
+            g.fillRect(juce::Rectangle<float>(0,0,(float)getWidth(),74.f));
+            // Native window controls remain owned by macOS; the header is an app toolbar.
+            g.setColour(kAccent);
+            g.fillRoundedRectangle(juce::Rectangle<float>(19.f,14.f,4.f,44.f),2.f);
+            g.setColour(kWarm.withAlpha(.32f));
+            g.drawLine(102.f,64.f,430.f,64.f,.8f);
+            g.setColour(juce::Colours::black.withAlpha(.72f));
+            g.drawLine(0,74.f,(float)getWidth(),74.f,2.f);
+
+            const std::array<juce::String,6> names {{
+                "INPUT", "PRE VST3", "SCULPT CH (FISSO)","NAM / CAB", "POST VST3", "OUTPUT"}};
+            const std::array<juce::String,6> subtitles {{
+                "AUDIO · MIDI · TUNER", "PLUGIN VST3 · PRE AMP", "CHANNEL PROCESSOR",
+                "CATTURE NAM + IR", "PLUGIN VST3 · POST AMP", "AUDIO · MASTER"}};
+            for(int i=0;i<6;++i){
+                const auto r=sections[(size_t)i].toFloat();
                 if(r.isEmpty())continue;
-                g.setColour(kPanel);g.fillRoundedRectangle(r,11.f);
-                g.setColour(juce::Colours::white.withAlpha(.07f));g.drawRoundedRectangle(r,11.f,1.f);
-                g.setColour(kWarm);g.setFont(juce::Font(juce::FontOptions(12.5f,juce::Font::bold)));
-                g.drawFittedText(headings[i],sections[i].reduced(12,0).withHeight(32).translated(0,8),juce::Justification::centredLeft,1);
-            }
-            auto meter=[&](int section,float db){
-                auto r=sections[(size_t)section];if(r.isEmpty())return;
-                const auto bar=r.reduced(14,0).withTrimmedTop(132).withHeight(14).toFloat();
-                g.setColour(juce::Colour(0xff33353b));g.fillRoundedRectangle(bar,3.f);
-                auto amt=juce::jlimit(0.f,1.f,(db+70.f)/70.f);
-                g.setColour(db>-9.f?kWarm:kGreen);
-                if(amt>.005f)g.fillRoundedRectangle(bar.withWidth(bar.getWidth()*amt),3.f);
-            };
-            meter(0,owner.levelDb.load());meter(5,owner.outputDb.load());
-            // Guitar tuner cents meter, centred on perfect tuning (0 cents).
-            if (!sections[0].isEmpty()) {
-                const auto in = sections[0].reduced(18,0);
-                const float left = (float) in.getX(), width = (float) in.getWidth();
-                const float centre = left + width*0.5f;
-                const float y = (float) sections[0].getY() + 294.f;
-                g.setColour(kMuted.withAlpha(0.55f));
-                g.drawLine(left,y,left+width,y,2.f);
-                g.setColour(kGreen);
-                g.drawLine(centre,y-6.f,centre,y+6.f,1.5f);
-                if (tunerPitchValid) {
-                    const float marker = centre + juce::jlimit(-50.f,50.f,tunerCurrentCents)/50.f * width*0.5f;
-                    g.setColour(std::abs(tunerCurrentCents) < 5.f ? kGreen : kWarm);
-                    g.fillEllipse(marker-4.5f,y-4.5f,9.f,9.f);
+                g.setGradientFill(juce::ColourGradient(juce::Colour(0xff262626),r.getX(),r.getY(),
+                                                        juce::Colour(0xff111313),r.getRight(),r.getBottom(),false));
+                g.fillRoundedRectangle(r,10.f);
+                g.setColour(juce::Colour(0xff777571).withAlpha(.28f));
+                g.drawRoundedRectangle(r.reduced(0.6f),10.f,1.2f);
+                g.setColour(kWarm.withAlpha(.50f));
+                g.drawLine(r.getX()+20.f,r.getY()+1.5f,r.getRight()-20.f,r.getY()+1.5f,1.2f);
+                g.setColour(kWarm);
+                g.setFont(juce::Font(juce::FontOptions(20.f,juce::Font::bold)));
+                g.drawText(juce::String(i+1)+".",r.getX()+14.f,r.getY()+12.f,28.f,29.f,juce::Justification::centredLeft);
+                g.setColour(kText);
+                g.setFont(juce::Font(juce::FontOptions(15.2f,juce::Font::bold)));
+                g.drawFittedText(names[(size_t)i],
+                    juce::Rectangle<int>((int)r.getX()+45,(int)r.getY()+12,(int)r.getWidth()-51,27),
+                    juce::Justification::centredLeft,1,.7f);
+                g.setColour(kMuted);
+                g.setFont(juce::Font(juce::FontOptions(10.5f,juce::Font::plain)));
+                g.drawFittedText(subtitles[(size_t)i],
+                    juce::Rectangle<int>((int)r.getX()+45,(int)r.getY()+40,(int)r.getWidth()-51,16),
+                    juce::Justification::centredLeft,1,.7f);
+                // Steel-panel screws and slots.
+                for(float xx:{r.getX()+9.f,r.getRight()-9.f})for(float yy:{r.getY()+9.f,r.getBottom()-11.f}){
+                    g.setColour(juce::Colour(0xff050606));g.fillEllipse(xx-2.9f,yy-2.9f,5.8f,5.8f);
+                    g.setColour(juce::Colour(0xff73716b).withAlpha(.75f));g.drawLine(xx-1.f,yy+1.f,xx+1.f,yy-1.f,.8f);
                 }
             }
-            for(int i=0;i<9;++i){
-                auto r=slotRects[(size_t)i].toFloat(); if(r.isEmpty())continue;
-                const bool active=owner.vstChain.enabled(i);
-                g.setColour(active?juce::Colour(0xff30363a):kPanelAlt);
-                g.fillRoundedRectangle(r,8.f);
-                g.setColour(active?kGreen.withAlpha(.35f):juce::Colours::white.withAlpha(.07f));
-                g.drawRoundedRectangle(r,8.f,1.f);
-                g.setColour(active?kGreen:kMuted);
-                g.fillEllipse(r.getRight()-15.f,r.getY()+13.f,6.f,6.f);
+            if(sections[0].isEmpty() || sections[5].isEmpty())return;
+            const auto in=sections[0],out=sections[5],sculpt=sections[2],nam=sections[3];
+            auto subhead=[&](juce::Rectangle<int> r,int yy,const juce::String& t){
+                g.setColour(kText);g.setFont(juce::Font(juce::FontOptions(11.8f,juce::Font::bold)));
+                g.drawText(t,r.getX()+16,yy,r.getWidth()-32,20,juce::Justification::centredLeft);
+            };
+            auto rule=[&](juce::Rectangle<int> r,int yy){
+                g.setColour(juce::Colour(0xff8c8170).withAlpha(.18f));
+                g.drawLine((float)r.getX()+14.f,(float)yy,(float)r.getRight()-14.f,(float)yy,.9f);
+            };
+            auto ledMeter=[&](juce::Rectangle<int> r,float db,int localY){
+                const int x=r.getCentreX()-42;
+                const int y=r.getY()+localY;
+                g.setColour(kBg);g.fillRoundedRectangle(juce::Rectangle<float>((float)x-32.f,(float)y-8.f,108.f,130.f),6.f);
+                for(int n=0;n<13;++n){
+                    const float yy=(float)y+(12-n)*8.8f;
+                    const bool lit=(db> -60.f + (float)n*5.0f);
+                    const auto color=n>=11?juce::Colour(0xffed4e36):n>=8?kWarm:kGreen;
+                    for(int ch=0;ch<2;++ch){
+                        g.setColour(lit?color:color.withAlpha(.18f));
+                        g.fillRect(x+ch*24,(int)yy,14,6);
+                    }
+                }
+                g.setColour(kMuted);g.setFont(juce::Font(juce::FontOptions(10.f)));
+                for(int n=0;n<4;++n){
+                    static constexpr int ticks[] = {0,-12,-36,-60};
+                    g.drawText(juce::String(ticks[n]),x+49,y-8+n*37,30,14,juce::Justification::centredLeft);
+                }
+                g.drawText("L",x,y+117,15,14,juce::Justification::centred);
+                g.drawText("R",x+24,y+117,15,14,juce::Justification::centred);
+            };
+            ledMeter(in,owner.levelDb.load(),214);
+            ledMeter(out,owner.outputDb.load(),214);
+            subhead(in,in.getY()+198,"LIVELLO INPUT");
+            subhead(out,out.getY()+198,"LIVELLO OUTPUT");
+            rule(in,in.getY()+387);rule(out,out.getY()+387);
+            rule(in,in.getY()+563);rule(out,out.getY()+594);
+            // Chromatic tuner indicators are genuinely driven by the DI detector.
+            const auto nx=(float)in.getCentreX();
+            const auto tunerY=(float)in.getY()+455.f;
+            for(int side : {-1,1}){
+                const auto cents=juce::jlimit(-35.f,35.f,tunerCurrentCents);
+                const bool inTune=tunerPitchValid && std::abs(cents)<5.0f;
+                g.setColour(inTune?kGreen:kWarm.withAlpha(.7f));
+                g.fillRoundedRectangle(juce::Rectangle<float>(nx+(float)side*73.f-2.f,tunerY-16.f,4.f,45.f),2.f);
             }
-            g.setColour(kMuted.withAlpha(.4f));
-            g.drawLine(18.f,(float)getHeight()-35, (float)getWidth()-18,(float)getHeight()-35,1.f);
+            g.setColour(kMuted.withAlpha(.45f));
+            g.drawLine(in.getX()+18.f,tunerY+47.f,in.getRight()-18.f,tunerY+47.f,1.f);
+            g.setColour(tunerPitchValid && std::abs(tunerCurrentCents)<5.f?kGreen:kWarm);
+            const float marker=nx+juce::jlimit(-50.f,50.f,tunerCurrentCents)/50.f*(in.getWidth()-48.f)/2.f;
+            (void) marker;
+
+            // Studio channel processor texture / module label.
+            auto proc=juce::Rectangle<float>((float)sculpt.getX()+14.f,(float)sculpt.getY()+169.f,
+                                (float)sculpt.getWidth()-28.f,57.f);
+            g.setGradientFill(juce::ColourGradient(juce::Colour(0xff45413a),proc.getX(),proc.getY(),
+                                                  juce::Colour(0xff0b0b0c),proc.getX(),proc.getBottom(),false));
+            g.fillRoundedRectangle(proc,6.f);
+            g.setColour(juce::Colour(0xff747270));g.drawRoundedRectangle(proc,6.f,1.2f);
+            g.setColour(kText);g.setFont(juce::Font(juce::FontOptions(16.f,juce::Font::bold)));
+            g.drawFittedText("SCULPT CHANNEL",proc.toNearestInt().reduced(5,3),juce::Justification::centred,1,.85f);
+            g.setColour(kMuted);g.setFont(juce::Font(juce::FontOptions(8.2f)));
+            g.drawText("TONE  •  DYNAMICS  •  CHARACTER",(int)proc.getX(),(int)proc.getBottom()-20,
+                       (int)proc.getWidth(),13,juce::Justification::centred);
+            g.setColour(kGreen);g.fillEllipse(sculpt.getX()+19.f,sculpt.getY()+116.f,8.f,8.f);
+
+            // A real cabinet photograph/illustration borrowed from the approved concept.
+            static const juce::Image art=juce::ImageCache::getFromMemory(BinaryData::RigArtwork_png,
+                                                                  BinaryData::RigArtwork_pngSize);
+            if(art.isValid()){
+                const auto cabR=juce::Rectangle<float>((float)nam.getX()+18.f,(float)nam.getY()+331.f,
+                                                       (float)nam.getWidth()-36.f,158.f);
+                g.drawImage(art,(int)cabR.getX(),(int)cabR.getY(),(int)cabR.getWidth(),
+                            (int)cabR.getHeight(),0,180,235,180);
+                g.setColour(kWarm.withAlpha(.45f));g.drawRoundedRectangle(cabR,5.f,1.f);
+            }
+            // Neutral pedal shells frame the *real* VST3 selectors, editor and bypass.
+            for(int i=0;i<9;++i){
+                if(i==4)continue;
+                const auto r=slotRects[(size_t)i].toFloat();if(r.isEmpty())continue;
+                const int ix=i<4?i:i-1;
+                const auto color=kPedalColours[(size_t)ix];
+                const bool loaded=owner.vstChain.get(i)!=nullptr;
+                const bool enabled=loaded && owner.vstChain.enabled(i);
+                g.setGradientFill(juce::ColourGradient(color.darker(.20f),r.getX(),r.getY(),
+                                      juce::Colour(0xff151616),r.getRight(),r.getBottom(),false));
+                g.fillRoundedRectangle(r,8.f);
+                g.setColour(color.withAlpha(.85f));g.drawRoundedRectangle(r.reduced(1.f),8.f,1.5f);
+                // Decorative rack thumbnails are not editable; use EDIT for the native VST3 UI.
+                if(art.isValid()){
+                    const auto rack=r.reduced(60.f,0.f).withY(r.getY()+69.f).withHeight(45.f);
+                    if(rack.getWidth()>20.f)
+                        g.drawImage(art,(int)rack.getX(),(int)rack.getY(),(int)rack.getWidth(),
+                                    (int)rack.getHeight(),(ix%4)*230,(ix/4)*77,210,70);
+                }
+                const float footX=r.getX()+35.f, footY=r.getY()+92.f;
+                g.setGradientFill(juce::ColourGradient(juce::Colour(0xffb9b4a9),footX-13,footY-13,
+                                                       juce::Colour(0xff252729),footX+13,footY+13,false));
+                g.fillEllipse(footX-15.f,footY-15.f,30.f,30.f);
+                g.setColour(juce::Colours::black);g.drawEllipse(footX-15.f,footY-15.f,30.f,30.f,1.5f);
+                g.setColour(enabled?kAccent:juce::Colour(0xff55443b));
+                g.fillEllipse(r.getX()+14.f,r.getY()+46.f,7.f,7.f);
+                g.setColour(enabled?kAccent.withAlpha(.65f):kMuted.withAlpha(.2f));
+                g.drawEllipse(r.getX()+11.5f,r.getY()+43.5f,12.f,12.f,1.6f);
+                for(float xx:{r.getX()+6.f,r.getRight()-8.f})for(float yy:{r.getY()+6.f,r.getBottom()-8.f}){
+                    g.setColour(kBg);g.fillEllipse(xx-2.f,yy-2.f,4.f,4.f);
+                    g.setColour(kMuted.withAlpha(.45f));g.drawLine(xx-1,yy+1,xx+1,yy-1,.8f);
+                }
+            }
+            // Visual arrows mark processing direction; ordering is the actual engine order.
+            for(int i=0;i<5;++i){
+                const float x=(sections[(size_t)i].getRight()+sections[(size_t)i+1].getX())*.5f;
+                const float y=(float)sections[0].getY()+sections[0].getHeight()*.53f;
+                juce::Path path;path.startNewSubPath(x-2.f,y-8.f);path.lineTo(x+2.f,y);path.lineTo(x-2.f,y+8.f);
+                g.setColour(kWarm.withAlpha(.75f));g.strokePath(path,juce::PathStrokeType(1.6f));
+            }
         }
 
         void resized() override {
-            const int gap=9,pad=14;
-            const int width=getWidth()-2*pad-5*gap;
-            const std::array<float,6> fractions{{.117f,.23f,.14f,.166f,.23f,.117f}};
-            int x=pad;
-            const int y=94, h=getHeight()-94-47;
+            const int gap=9,pad=12;
+            const int available=getWidth()-2*pad-5*gap;
+            const std::array<float,6> fractions{{.144f,.198f,.159f,.168f,.198f,.133f}};
+            int x=pad; const int y=78,h=getHeight()-90;
             for(int i=0;i<6;++i){
-                const int w=i==5?getWidth()-pad-x:(int)std::round(width*fractions[(size_t)i]);
+                const int w=i==5?getWidth()-pad-x:(int)std::round(available*fractions[(size_t)i]);
                 sections[(size_t)i]={x,y,w,h};x+=w+gap;
             }
-            auto input=sections[0].reduced(12,0),pre=sections[1].reduced(10,0),sculpt=sections[2].reduced(9,0);
-            auto nam=sections[3].reduced(12,0),post=sections[4].reduced(10,0),output=sections[5].reduced(12,0);
-            brand.setBounds(32,15,385,31);
-            subtitle.setBounds(33,52,430,19);
-            const int middle=getWidth()/2;
-            presetHeading.setBounds(middle-296,14,88,26);
-            presetPicker.setBounds(middle-208,15,169,32);
-            presetNameEditor.setBounds(middle-33,15,146,32);
-            presetSave.setBounds(middle+119,15,77,32);
-            presetRefresh.setBounds(middle+201,15,34,32);
-            toneLabel.setBounds(getWidth()-514,17,90,19);
-            toneQuery.setBounds(getWidth()-425,15,252,31);
-            toneSearch.setBounds(getWidth()-166,15,140,31);
-            status.setBounds(getWidth()/3,54,getWidth()*2/3-38,22);
-            inputSetup.setBounds(input.getX(),y+48,input.getWidth(),31);
-            inMeter.setBounds(input.getX(),y+108,input.getWidth(),20);
-            tunerHeading.setBounds(input.getX(),y+181,input.getWidth(),20);
-            tunerNote.setBounds(input.getX(),y+207,input.getWidth(),55);
-            tunerInfo.setBounds(input.getX(),y+263,input.getWidth(),24);
-            tunerButton.setBounds(input.getX(),y+309,input.getWidth(),36);
-            gateHeading.setBounds(input.getX(),y+395,input.getWidth(),20);
-            gateBypass.setBounds(input.getX(),y+429,input.getWidth(),33);
-            gateThreshold.setBounds(input.getX(),y+482,input.getWidth(),65);
-            outputSetup.setBounds(output.getX(),y+48,output.getWidth(),31);
-            outMeter.setBounds(output.getX(),y+108,output.getWidth(),20);
-            masterHeading.setBounds(output.getX(),y+191,output.getWidth(),19);
-            masterSlider.setBounds(output.getX()+output.getWidth()/2-30,y+226,60,215);
-            masterReadout.setBounds(output.getX(),y+460,output.getWidth(),25);
+            auto input=sections[0].reduced(13,0),pre=sections[1].reduced(9,0),
+                 sculpt=sections[2].reduced(11,0),nam=sections[3].reduced(13,0),
+                 post=sections[4].reduced(9,0),output=sections[5].reduced(13,0);
+            brand.setBounds(100,10,315,31);
+            subtitle.setBounds(101,43,315,21);
+            presetHeading.setBounds(412,13,76,23);
+            presetPicker.setBounds(491,11,176,32);
+            presetNameEditor.setBounds(675,11,166,32);
+            presetSave.setBounds(849,11,73,32);
+            presetRefresh.setBounds(930,11,35,32);
+            toneLabel.setBounds(getWidth()-522,17,81,20);
+            toneQuery.setBounds(getWidth()-441,11,272,32);
+            toneSearch.setBounds(getWidth()-163,11,133,32);
+            status.setBounds(412,47,getWidth()-442,22);
+            inputSetup.setBounds(input.getX(),y+66,input.getWidth(),33);
+            inputDeviceInfo.setBounds(input.getX(),y+122,input.getWidth(),31);
+            inputPortInfo.setBounds(input.getX(),y+162,input.getWidth(),30);
+            inMeter.setBounds(input.getX(),y+349,input.getWidth(),28);
+            tunerHeading.setBounds(input.getX(),y+394,input.getWidth(),22);
+            tunerNote.setBounds(input.getX(),y+419,input.getWidth(),67);
+            tunerInfo.setBounds(input.getX(),y+486,input.getWidth(),22);
+            tunerButton.setBounds(input.getX(),y+514,input.getWidth(),36);
+            gateHeading.setBounds(input.getX(),y+573,input.getWidth(),22);
+            gateBypass.setBounds(input.getX(),y+601,input.getWidth(),32);
+            gateThreshold.setBounds(input.getX(),y+643,input.getWidth(),90);
+            outputSetup.setBounds(output.getX(),y+66,output.getWidth(),33);
+            outputDeviceInfo.setBounds(output.getX(),y+122,output.getWidth(),31);
+            outputPortInfo.setBounds(output.getX(),y+162,output.getWidth(),30);
+            outMeter.setBounds(output.getX(),y+349,output.getWidth(),28);
+            masterHeading.setBounds(output.getX(),y+395,output.getWidth(),23);
+            masterSlider.setBounds(output.getCentreX()-66,y+433,132,134);
+            masterReadout.setBounds(output.getX(),y+569,output.getWidth(),26);
             masterReadout.setJustificationType(juce::Justification::centred);
-            tapHeading.setBounds(output.getX(),y+518,output.getWidth(),24);
-            tapReadout.setBounds(output.getX(),y+551,output.getWidth(),34);
-            tapButton.setBounds(output.getX(),y+602,output.getWidth(),40);
-            namName.setBounds(nam.getX(),y+50,nam.getWidth(),42);
-            namPicker.setBounds(nam.getX(),y+105,nam.getWidth(),32);
-            prevNam.setBounds(nam.getX(),y+148,35,30);
-            nextNam.setBounds(nam.getX()+40,y+148,35,30);
-            loadNam.setBounds(nam.getX()+80,y+148,nam.getWidth()-80,30);
-            loadIr.setBounds(nam.getX(),y+215,nam.getWidth(),33);
-            irName.setBounds(nam.getX(),y+260,nam.getWidth(),52);
-            namInputHeading.setBounds(nam.getX(),y+346,nam.getWidth(),18);
-            namGains[0].setBounds(nam.getX(),y+371,nam.getWidth(),37);
-            namOutputHeading.setBounds(nam.getX(),y+426,nam.getWidth(),18);
-            namGains[1].setBounds(nam.getX(),y+451,nam.getWidth(),37);
-
-            // Four pedal inserts in each bank; compact independent controls per row.
-            const int top=y+47, usable=h-62, rowH=(usable-24)/4;
+            tapHeading.setBounds(output.getX(),y+611,output.getWidth(),23);
+            tapReadout.setBounds(output.getX(),y+635,output.getWidth(),37);
+            tapButton.setBounds(output.getX(),y+680,output.getWidth(),38);
+            namName.setBounds(nam.getX(),y+68,nam.getWidth(),27);
+            namPicker.setBounds(nam.getX(),y+112,nam.getWidth(),34);
+            prevNam.setBounds(nam.getX(),y+160,36,31);
+            nextNam.setBounds(nam.getX()+42,y+160,36,31);
+            loadNam.setBounds(nam.getX()+84,y+160,nam.getWidth()-84,31);
+            loadIr.setBounds(nam.getX(),y+223,nam.getWidth(),36);
+            irName.setBounds(nam.getX(),y+265,nam.getWidth(),28);
+            namInputHeading.setBounds(nam.getX(),y+507,nam.getWidth(),20);
+            namGains[0].setBounds(nam.getX(),y+532,nam.getWidth(),43);
+            namOutputHeading.setBounds(nam.getX(),y+598,nam.getWidth(),20);
+            namGains[1].setBounds(nam.getX(),y+623,nam.getWidth(),43);
+            const int top=y+67, usable=h-85, rowH=(usable-24)/4;
             for(int k=0;k<4;++k){
-                auto r=juce::Rectangle<int>(pre.getX(),top+k*(rowH+8),pre.getWidth(),rowH);
-                layoutSlot(k,r);
-                auto q=juce::Rectangle<int>(post.getX(),top+k*(rowH+8),post.getWidth(),rowH);
-                layoutSlot(5+k,q);
+                layoutSlot(k,{pre.getX(),top+k*(rowH+8),pre.getWidth(),rowH});
+                layoutSlot(5+k,{post.getX(),top+k*(rowH+8),post.getWidth(),rowH});
             }
-            sculptName.setBounds(sculpt.getX(),y+52,sculpt.getWidth(),37);
-            auto r=juce::Rectangle<int>(sculpt.getX(),y+96,sculpt.getWidth(),107);
-            layoutSlot(4,r);
-            sculptHeading.setBounds(sculpt.getX(),y+214,sculpt.getWidth(),20);
-            const int knobW=juce::jmax(65,(sculpt.getWidth()-12)/2);
-            const int knobH=112;
+            sculptName.setBounds(sculpt.getX(),y+73,sculpt.getWidth(),31);
+            layoutSlot(4,{sculpt.getX(),y+90,sculpt.getWidth(),128});
+            sculptHeading.setBounds(sculpt.getX(),y+240,sculpt.getWidth(),23);
+            const int knobW=(sculpt.getWidth()-14)/2;
             for(int k=0;k<5;++k){
                 const int col=k%2,row=k/2;
-                const int kx=sculpt.getX()+col*(knobW+7), ky=y+253+row*knobH;
-                knobLabels[(size_t)k].setBounds(kx,ky,knobW,17);
-                knobs[(size_t)k].setBounds(kx+7,ky+18,knobW-14,63);
-                knobValues[(size_t)k].setBounds(kx,ky+80,knobW,19);
+                const int kx=sculpt.getX()+col*(knobW+12),ky=y+271+row*128;
+                knobLabels[(size_t)k].setBounds(kx,ky,knobW,20);
+                knobs[(size_t)k].setBounds(kx+3,ky+24,knobW-6,77);
+                knobValues[(size_t)k].setBounds(kx,ky+102,knobW,20);
             }
-            variation.setBounds(sculpt.getX(),y+590,sculpt.getWidth(),30);
-            labelizeLocation(y);
+            variation.setBounds(sculpt.getX(),y+662,sculpt.getWidth(),37);
         }
     private:
         void savePreset(){
@@ -817,19 +1036,28 @@ private:
         void layoutSlot(int index,juce::Rectangle<int> r){
             slotRects[(size_t)index]=r;
             const int x=r.getX()+10,y=r.getY()+7,w=r.getWidth()-20;
-            slotNames[(size_t)index].setBounds(x,y,w-20,20);
-            slotMenus[(size_t)index].setBounds(x,y+28,w,29);
-            slotStatus[(size_t)index].setBounds(x,y+60,w,24);
-            const int rowBottom=r.getBottom()-36;
-            const int editW=juce::jmax(38,(w-16)*4/10);
-            editors[(size_t)index].setBounds(x,rowBottom,editW,27);
-            power[(size_t)index].setBounds(x+editW+5,rowBottom,juce::jmax(46,w-editW-45),27);
-            clearButtons[(size_t)index].setBounds(x+w-32,rowBottom,32,27);
-            if (index == VstChain::sculptSlot) {
-                editors[(size_t)index].setBounds(x,rowBottom,w,27);
+            if(index == VstChain::sculptSlot){
+                slotNames[(size_t)index].setBounds(0,0,0,0);
+                slotMenus[(size_t)index].setBounds(x,y+2,w,32);
+                slotStatus[(size_t)index].setBounds(0,0,0,0);
+                editors[(size_t)index].setBounds(x,y+43,w,28);
                 power[(size_t)index].setBounds(0,0,0,0);
                 clearButtons[(size_t)index].setBounds(0,0,0,0);
+                footswitches[(size_t)index].setBounds(0,0,0,0);
+                previewButtons[(size_t)index].setBounds(0,0,0,0);
+                return;
             }
+            slotNames[(size_t)index].setBounds(x,y,w-20,20);
+            slotMenus[(size_t)index].setBounds(x+66,y+1,w-66,30);
+            slotStatus[(size_t)index].setBounds(x+65,y+73,w-69,20);
+            footswitches[(size_t)index].setBounds(r.getX()+20,r.getY()+77,30,30);
+            previewButtons[(size_t)index].setBounds(r.getX()+62,r.getY()+69,
+                                            juce::jmax(10,r.getWidth()-72),45);
+            const int rowBottom=r.getBottom()-33;
+            const int small=juce::jmax(43,(w-16)/3);
+            editors[(size_t)index].setBounds(x,rowBottom,small,27);
+            power[(size_t)index].setBounds(x+small+5,rowBottom,small+7,27);
+            clearButtons[(size_t)index].setBounds(x+w-32,rowBottom,32,27);
         }
         void openToneSearch(){
             owner.tone3000Query.setText(toneQuery.getText(),juce::dontSendNotification);
@@ -885,6 +1113,16 @@ private:
         void updateLabels(){
             inMeter.setText(juce::String(owner.levelDb.load(),1)+" dBFS",juce::dontSendNotification);
             outMeter.setText(juce::String(owner.outputDb.load(),1)+" dBFS",juce::dontSendNotification);
+            if(auto* dev=owner.deviceManager.getCurrentAudioDevice()){
+                inputDeviceInfo.setText(dev->getName(),juce::dontSendNotification);
+                outputDeviceInfo.setText(dev->getName(),juce::dontSendNotification);
+                const auto cfg=owner.deviceManager.getAudioDeviceSetup();
+                inputPortInfo.setText("Input: " + juce::String(cfg.inputChannels.countNumberOfSetBits()) + " ch attivi",juce::dontSendNotification);
+                outputPortInfo.setText("Output: " + juce::String(cfg.outputChannels.countNumberOfSetBits()) + " ch attivi",juce::dontSendNotification);
+            }else{
+                inputDeviceInfo.setText("Nessun dispositivo",juce::dontSendNotification);
+                outputDeviceInfo.setText("Nessun dispositivo",juce::dontSendNotification);
+            }
             gateBypass.setButtonText(owner.gateEnabled.load()?"GATE ON":"GATE OFF");
             if(!gateThreshold.isMouseButtonDown()) gateThreshold.setValue(owner.gateThresholdDb.load(),juce::dontSendNotification);
             const bool mute = owner.tunerMute.load(std::memory_order_relaxed);
@@ -983,7 +1221,7 @@ private:
         bool tunerPitchValid=false;
         float tunerCurrentCents=0.f;
         std::array<juce::String,5> paramNames;
-        juce::Label brand,subtitle,status,inMeter,outMeter,namName,irName,sculptName,gateHeading,masterHeading,masterReadout,sculptHeading;
+        juce::Label brand,subtitle,status,inMeter,outMeter,inputDeviceInfo,outputDeviceInfo,inputPortInfo,outputPortInfo,namName,irName,sculptName,gateHeading,masterHeading,masterReadout,sculptHeading;
         juce::Label tunerHeading,tunerNote,tunerInfo,tapHeading,tapReadout;
         juce::TextButton tunerButton,tapButton;
         double lastTapMs = 0.0;
@@ -997,6 +1235,7 @@ private:
         std::array<juce::Label,9> slotNames,slotStatus;
         std::array<juce::ComboBox,9> slotMenus;
         std::array<juce::TextButton,9> editors,power,clearButtons;
+        std::array<InvisibleButton,9> footswitches,previewButtons;
         std::array<juce::Slider,5> knobs;
         std::array<juce::Label,5> knobLabels,knobValues;
     };
@@ -1572,14 +1811,14 @@ private:
 
 class SculptMainWindow final : public juce::DocumentWindow {
 public:
-    SculptMainWindow() : juce::DocumentWindow("Sculpt Guitar Rig — Beta", kBg, juce::DocumentWindow::allButtons) {}
+    SculptMainWindow() : juce::DocumentWindow("Sculpt Guitar Rig — Analog GUI", kBg, juce::DocumentWindow::allButtons) {}
     void closeButtonPressed() override { juce::JUCEApplication::getInstance()->systemRequestedQuit(); }
 };
 
 class SculptApp final : public juce::JUCEApplication {
 public:
     const juce::String getApplicationName() override { return "Sculpt Guitar Rig"; }
-    const juce::String getApplicationVersion() override { return "1.2.0-beta-presets"; }
+    const juce::String getApplicationVersion() override { return "1.3.0-beta-analog-gui"; }
     bool moreThanOneInstanceAllowed() override { return false; }
     void initialise(const juce::String&) override {
         mainWindow = std::make_unique<SculptMainWindow>();
