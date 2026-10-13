@@ -157,7 +157,7 @@ public:
         title.setText("SCULPT  /  GUITAR RIG", juce::dontSendNotification);
         title.setFont(juce::Font(juce::FontOptions(27.f, juce::Font::bold)));
         title.setColour(juce::Label::textColourId, kText);
-        subtitle.setText("NAM  /  VST3  /  CAB IR  /  SCULPT CH      /      BETA 1.3.4", juce::dontSendNotification);
+        subtitle.setText("NAM  /  VST3  /  CAB IR  /  SCULPT CH      /      BETA 1.3.5", juce::dontSendNotification);
         subtitle.setFont(juce::Font(juce::FontOptions(11.f)));
         subtitle.setColour(juce::Label::textColourId, kWarm);
         status.setText("Rig manuale: scegli i tuoi NAM e i tuoi VST3. Host VST3 corretto e impostazioni audio preservate.", juce::dontSendNotification);
@@ -341,6 +341,10 @@ public:
             quickStore[(size_t)i].setButtonText("MEMORIZZA");
             quickStore[(size_t)i].onClick=[this,i]{storeQuickSlot(i);};
             addAndMakeVisible(quickStore[(size_t)i]);
+            quickClear[(size_t)i].setButtonText("X");
+            quickClear[(size_t)i].setTooltip("Svuota lo slot rapido (con conferma).");
+            quickClear[(size_t)i].onClick=[this,i]{confirmDeleteQuickSlot(i);};
+            addAndMakeVisible(quickClear[(size_t)i]);
         }
         refreshQuickSlots();
         audioSetupOverlay = std::make_unique<AudioSetupOverlay>(deviceManager, [this] { hideAudioSettings(); });
@@ -562,7 +566,8 @@ public:
         const int tile=(bounds.getWidth()-2*pad-4*gap)/5;
         for(int i=0;i<5;++i){
             const int x=pad+i*(tile+gap);
-            quickNames[(size_t)i].setBounds(x+22,footerTop+32,tile-30,17);
+            quickNames[(size_t)i].setBounds(x+22,footerTop+32,tile-75,17);
+            quickClear[(size_t)i].setBounds(x+tile-59,footerTop+29,26,22);
             quickRecall[(size_t)i].setBounds(x+8,footerTop+54,(tile*2)/3-4,32);
             quickStore[(size_t)i].setBounds(x+(tile*2)/3+5,footerTop+54,tile/3-12,32);
         }
@@ -693,6 +698,10 @@ private:
             presetRefresh.setButtonText("R");presetRefresh.setTooltip("Aggiorna l'elenco preset");
             presetRefresh.onClick=[this]{refreshPresets(true);};
             addAndMakeVisible(presetRefresh);
+            presetDelete.setButtonText("ELIMINA");
+            presetDelete.setTooltip("Scegli un preset da eliminare, senza doverlo caricare. Conferma richiesta.");
+            presetDelete.onClick=[this]{choosePresetToDelete();};
+            addAndMakeVisible(presetDelete);
             refreshPresets(true);
 
             inputSetup.setButtonText("SETUP AUDIO & MIDI  >");
@@ -1075,10 +1084,11 @@ private:
             presetNameEditor.setBounds(675,11,166,32);
             presetSave.setBounds(849,11,73,32);
             presetRefresh.setBounds(930,11,35,32);
+            presetDelete.setBounds(491,47,90,24);
             toneLabel.setBounds(getWidth()-522,17,81,20);
             toneQuery.setBounds(getWidth()-441,11,272,32);
             toneSearch.setBounds(getWidth()-163,11,133,32);
-            status.setBounds(412,47,getWidth()-442,22);
+            status.setBounds(594,47,getWidth()-624,22);
             inputSetup.setBounds(input.getX(),y+66,input.getWidth(),33);
             inputDeviceInfo.setBounds(input.getX(),y+122,input.getWidth(),31);
             inputPortInfo.setBounds(input.getX(),y+162,input.getWidth(),30);
@@ -1131,6 +1141,36 @@ private:
             variation.setBounds(sculpt.getX(),y+662,sculpt.getWidth(),37);
         }
     private:
+        // The delete menu is separate from the load menu. Choosing an item here NEVER recalls it.
+        void choosePresetToDelete(){
+            const auto names=owner.namedPresetNames();
+            if(names.isEmpty())return;
+            juce::PopupMenu menu;
+            for(int i=0;i<names.size();++i)menu.addItem(i+1,names[i]);
+            menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&presetDelete),
+                [safe=juce::Component::SafePointer<RigPanel>(this),names](int selectedId){
+                    if(safe==nullptr || selectedId<1 || selectedId>names.size())return;
+                    safe->confirmDeleteNamedPreset(names[selectedId-1]);
+                });
+        }
+        void confirmDeleteNamedPreset(const juce::String& name){
+            auto options=juce::MessageBoxOptions::makeOptionsOkCancel(
+                juce::MessageBoxIconType::WarningIcon,"Eliminare il preset?",
+                "Eliminare definitivamente il preset '"+name+"'?\n\nIl rig attualmente in uso non cambia.\nGli slot rapidi restano memorizzati.",
+                "ELIMINA","ANNULLA",this);
+            juce::AlertWindow::showAsync(options,
+                [safe=juce::Component::SafePointer<RigPanel>(this),name](int result){
+                    if(result!=1 || safe==nullptr)return;
+                    if(safe->owner.deleteNamedPreset(name)){
+                        safe->refreshPresets(true);
+                        if(safe->owner.currentPresetName.isEmpty()){
+                            safe->presetPicker.setSelectedId(1,juce::dontSendNotification);
+                            safe->presetNameEditor.clear();
+                        }
+                        safe->lastLoadedName=safe->owner.currentPresetName;
+                    }
+                });
+        }
         void savePreset(){
             const auto name=presetNameEditor.getText().trim();
             if(owner.saveNamedPreset(name)) refreshPresets(true);
@@ -1144,6 +1184,7 @@ private:
             for(int i=0;i<names.size();++i)presetPicker.addItem(names[i],i+2);
             const int id=names.indexOf(owner.currentPresetName);
             presetPicker.setSelectedId(id>=0?id+2:1,juce::dontSendNotification);
+            presetDelete.setEnabled(!names.isEmpty());
             if(owner.currentPresetName.isNotEmpty())presetNameEditor.setText(owner.currentPresetName,juce::dontSendNotification);
         }
         void labelizeLocation(int){}
@@ -1328,7 +1369,7 @@ private:
         juce::Label presetHeading,namInputHeading,namOutputHeading;
         juce::ComboBox presetPicker;
         juce::TextEditor presetNameEditor;
-        juce::TextButton presetSave,presetRefresh;
+        juce::TextButton presetSave,presetRefresh,presetDelete;
         juce::StringArray presetCatalog;
         juce::String lastLoadedName;
         std::array<juce::Slider,2> namGains;
@@ -1609,7 +1650,48 @@ private:
             }
             quickNames[(size_t)i].setText(juce::String(i+1)+"  /  "+name,juce::dontSendNotification);
             quickRecall[(size_t)i].setEnabled(file.existsAsFile());
+            quickClear[(size_t)i].setVisible(file.existsAsFile());
         }
+    }
+    // Delete the saved file only: do not unload plugins, change DSP or overwrite quick slots.
+    bool deleteNamedPreset(const juce::String& name){
+        if(name.isEmpty())return false;
+        const auto file=namedPresetFile(name);
+        if(!file.existsAsFile()){
+            status.setText("PRESET NON TROVATO: "+name,juce::dontSendNotification);
+            return false;
+        }
+        if(!file.deleteFile()){
+            status.setText("IMPOSSIBILE ELIMINARE IL PRESET: "+name,juce::dontSendNotification);
+            return false;
+        }
+        if(currentPresetName==name)currentPresetName.clear();
+        status.setText("PRESET ELIMINATO: "+name+" (rig attuale invariato)",juce::dontSendNotification);
+        return true;
+    }
+    bool deleteQuickSlot(int index){
+        if(index<0 || index>=5)return false;
+        const auto file=quickPresetFile(index);
+        if(!file.existsAsFile())return false;
+        if(!file.deleteFile()){
+            status.setText("IMPOSSIBILE SVUOTARE LO SLOT "+juce::String(index+1),juce::dontSendNotification);
+            return false;
+        }
+        status.setText("SLOT RAPIDO "+juce::String(index+1)+" SVUOTATO (rig attuale invariato)",juce::dontSendNotification);
+        refreshQuickSlots();
+        return true;
+    }
+    void confirmDeleteQuickSlot(int index){
+        if(index<0 || index>=5 || !quickPresetFile(index).existsAsFile())return;
+        const auto slotName=quickNames[(size_t)index].getText();
+        auto options=juce::MessageBoxOptions::makeOptionsOkCancel(
+            juce::MessageBoxIconType::WarningIcon,"Svuotare lo slot rapido?",
+            "Eliminare "+slotName+"?\n\nIl preset normale eventualmente associato non sarà eliminato.\nIl rig attualmente caricato resterà invariato.",
+            "SVUOTA","ANNULLA",this);
+        juce::AlertWindow::showAsync(options,
+            [safe=juce::Component::SafePointer<GuitarRigWindow>(this),index](int result){
+                if(result==1 && safe!=nullptr)safe->deleteQuickSlot(index);
+            });
     }
     bool loadNamedPreset(const juce::String& name){
         const bool ok=loadPresetFile(namedPresetFile(name));
@@ -1921,7 +2003,7 @@ private:
     juce::Viewport rigViewport;
     juce::Label quickTitle;
     std::array<juce::Label,5> quickNames;
-    std::array<juce::TextButton,5> quickRecall,quickStore;
+    std::array<juce::TextButton,5> quickRecall,quickStore,quickClear;
     juce::String currentPresetName;
     std::unique_ptr<RigPanel> rigPanel;
     std::unique_ptr<AudioSetupOverlay> audioSetupOverlay;
