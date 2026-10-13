@@ -99,7 +99,7 @@ public:
         title.setText("SCULPT  /  AUTO TONE", juce::dontSendNotification);
         title.setFont(juce::Font(juce::FontOptions(27.f, juce::Font::bold)));
         title.setColour(juce::Label::textColourId, kText);
-        subtitle.setText("LIVE NEURAL TONE FINDER     •     BETA 0.3", juce::dontSendNotification);
+        subtitle.setText("LIVE NEURAL TONE FINDER     •     BETA 0.4", juce::dontSendNotification);
         subtitle.setFont(juce::Font(juce::FontOptions(11.f)));
         subtitle.setColour(juce::Label::textColourId, kWarm);
         status.setText("Collega la scheda audio e scegli una cartella NAM per cominciare.", juce::dontSendNotification);
@@ -139,6 +139,31 @@ public:
         reasonLabel.setText("L'app analizza la dinamica del segnale in ingresso.",juce::dontSendNotification);
         countLabel.setText("0 MODELLI CARICATI",juce::dontSendNotification);
         irLabel.setText("Cabinet IR: nessuna",juce::dontSendNotification);
+
+        // Master output: UI writes an atomic dB target; audio applies a smoothed gain
+        // after the NAM and cabinet IR to avoid clicks while adjusting level.
+        masterLabel.setText("0.0 dB", juce::dontSendNotification);
+        masterLabel.setFont(juce::Font(juce::FontOptions(13.0f, juce::Font::bold)));
+        masterLabel.setColour(juce::Label::textColourId, kText);
+        masterLabel.setJustificationType(juce::Justification::centredRight);
+        addAndMakeVisible(masterLabel);
+        masterSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        masterSlider.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        masterSlider.setRange(-60.0, 6.0, 0.5);
+        masterSlider.setDoubleClickReturnValue(true, 0.0);
+        masterSlider.setColour(juce::Slider::trackColourId, kAccent);
+        masterSlider.setColour(juce::Slider::backgroundColourId, kPanelAlt);
+        masterSlider.setColour(juce::Slider::thumbColourId, kWarm);
+        masterSlider.setTooltip("Volume dopo NAM e cabinet IR. Da -60 dB (mute) a +6 dB. Doppio clic: 0 dB.");
+        masterSlider.onValueChange = [this] {
+            const float db = static_cast<float>(masterSlider.getValue());
+            masterGainDb.store(db, std::memory_order_relaxed);
+            masterLabel.setText(db <= -60.f ? "MUTE" :
+                                juce::String(db > 0.f ? "+" : "") + juce::String(db, 1) + " dB",
+                                juce::dontSendNotification);
+        };
+        addAndMakeVisible(masterSlider);
+        masterSlider.setValue(0.0, juce::dontSendNotification);
 
         // TONE3000 integration: direct search via the official website in the user's
         // browser, without scraping, API secrets, or unsupported catalog endpoints.
@@ -232,6 +257,9 @@ public:
         outA.fill(0); outB.fill(0);
         brain.reset(sampleRate);
         sampleRateLive.store(sampleRate);
+        masterGain.reset(sampleRate, 0.03); // 30 ms gain smoothing; audio thread only
+        const float initialDb = masterGainDb.load(std::memory_order_relaxed);
+        masterGain.setCurrentAndTargetValue(initialDb <= -60.f ? 0.f : gainFromDb(initialDb));
         cab.prepare({ sampleRate, static_cast<juce::uint32>(kBlock), 1 });
         cab.reset();
         activeIndex = captures.empty() ? -1 : 0;
@@ -302,8 +330,13 @@ public:
                     outA[static_cast<size_t>(i)] = lowpassZ;
                 }
             }
+            // Final master gain: post-NAM, post-IR. The existing safety clamp stays in place.
+            const float masterDb = masterGainDb.load(std::memory_order_relaxed);
+            masterGain.setTargetValue(masterDb <= -60.f ? 0.f : gainFromDb(masterDb));
             auto* left = audio->getWritePointer(0, start + offset);
-            for (int i=0;i<n;++i) left[i] = juce::jlimit(-0.85f,0.85f,outA[static_cast<size_t>(i)]);
+            for (int i=0;i<n;++i)
+                left[i] = juce::jlimit(-0.85f, 0.85f,
+                    outA[static_cast<size_t>(i)] * masterGain.getNextValue());
             for (int ch=1;ch<numChannels;++ch) audio->copyFrom(ch,start+offset,*audio,0,start+offset,n);
             if (automatic.load()) {
                 for (size_t j = 0; j < currentFeedback.size(); ++j)
@@ -357,9 +390,11 @@ public:
 
         g.setColour(kMuted.withAlpha(0.18f));
         g.drawLine(42.f,270.f,256.f,270.f,1.f);
-        g.drawLine(42.f,412.f,256.f,412.f,1.f);
+        g.drawLine(42.f,398.f,256.f,398.f,1.f);
+        g.drawLine(42.f,476.f,256.f,476.f,1.f);
         caption("LIVE SIGNAL",43,285,210);
-        caption("CONTROLS",43,420,210);
+        caption("MASTER OUTPUT",43,407,148);
+        caption("CONTROLS",43,484,210);
         caption("TONE PROFILE",316,185,310);
 
         // In real operation this meter follows the input level. A missing device is never shown as active.
@@ -437,13 +472,15 @@ public:
         audioButton.setBounds(43,172,211,43);
         deviceLabel.setBounds(43,221,211,23);
         sampleLabel.setBounds(43,246,211,20);
-        level.setBounds(43,348,150,29);
-        signalLabel.setBounds(43,382,210,24);
-        autoButton.setBounds(43,450,101,46);
-        lockButton.setBounds(153,450,101,46);
-        folderButton.setBounds(43,512,211,41);
-        irButton.setBounds(43,560,211,41);
-        countLabel.setBounds(43,615,211,22);
+        level.setBounds(43,346,150,27);
+        signalLabel.setBounds(43,375,210,22);
+        masterLabel.setBounds(170,404,84,22);
+        masterSlider.setBounds(40,430,216,34);
+        autoButton.setBounds(43,508,101,37);
+        lockButton.setBounds(153,508,101,37);
+        folderButton.setBounds(43,554,211,35);
+        irButton.setBounds(43,597,211,35);
+        countLabel.setBounds(43,635,211,20);
         current.setBounds(322,221,494,60);
         categoryLabel.setBounds(327,280,484,32);
         irLabel.setBounds(327,454,484,28);
@@ -457,7 +494,7 @@ public:
         likeButton.setBounds(870,618,142,30);
         skipButton.setBounds(1020,618,142,30);
         status.setBounds(27,681,860,26);
-        info.setBounds(43,637,214,24);
+        info.setBounds(0,0,0,0); // already explained in the central analysis panel
     }
 
 private:
@@ -632,7 +669,8 @@ private:
     }
 
     SculptLook sculptLook;
-    juce::Label title, subtitle, status, current, level, info, tone3000Brand;
+    juce::Label title, subtitle, status, current, level, info, tone3000Brand, masterLabel;
+    juce::Slider masterSlider;
     juce::TextEditor tone3000Query;
     juce::TextButton tone3000Search;
     juce::Label deviceLabel, sampleLabel, categoryLabel, reasonLabel, signalLabel, countLabel, irLabel, modeLabel;
@@ -648,10 +686,11 @@ private:
     ToneBrain brain;
     std::atomic<int> requestedIndex{-1}, shownIndex{-1};
     std::atomic<bool> locked{false}, automatic{true}, irLoaded{false};
-    std::atomic<float> levelDb{-90.f}, analysisTarget{0.f};
+    std::atomic<float> levelDb{-90.f}, analysisTarget{0.f}, masterGainDb{0.f};
     std::atomic<double> sampleRateLive{48000.};
     int activeIndex = -1, fadingFrom = -1, fadeRemaining = 0;
     float lowpassZ = 0.0f;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> masterGain;
     std::array<float, kBlock> inputScratch{}, driven{}, outA{}, outB{};
     juce::AudioBuffer<float> cabBuffer{1,kBlock};
     juce::dsp::Convolution cab;
@@ -668,7 +707,7 @@ public:
 class SculptApp final : public juce::JUCEApplication {
 public:
     const juce::String getApplicationName() override { return "Sculpt AutoTone"; }
-    const juce::String getApplicationVersion() override { return "0.3.0-beta-tone3000-search"; }
+    const juce::String getApplicationVersion() override { return "0.4.0-beta-master-output"; }
     bool moreThanOneInstanceAllowed() override { return false; }
     void initialise(const juce::String&) override {
         mainWindow = std::make_unique<SculptMainWindow>();
