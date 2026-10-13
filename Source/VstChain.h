@@ -2,11 +2,66 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <array>
 #include <atomic>
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <memory>
 
 // Nine hosted VST3 insert positions: PRE 1-4, SCULPT CHANNEL, POST 1-4.
 // Plugin creation, removal and state changes happen only with the audio callback stopped.
 // Bypass toggles are atomic; the audio callback never uses locks or allocates plugin instances.
+// Live-host musical clock. Every hosted VST3 receives the same timing and tempo
+// through AudioProcessor::setPlayHead(). The clock advances once per host block,
+// never once per plugin: PRE, Sculpt Channel and POST remain phase-aligned.
+class SculptRigPlayHead final : public juce::AudioPlayHead {
+public:
+    juce::Optional<PositionInfo> getPosition() const override {
+        PositionInfo position;
+        const double tempo = bpm.load(std::memory_order_relaxed);
+        const double beat = ppq.load(std::memory_order_relaxed);
+        const auto sample = samples.load(std::memory_order_relaxed);
+        const double rate = sampleRate.load(std::memory_order_relaxed);
+        position.setBpm(tempo);
+        position.setTimeSignature(TimeSignature{4, 4});
+        position.setPpqPosition(beat);
+        position.setPpqPositionOfLastBarStart(std::floor(beat / 4.0) * 4.0);
+        position.setBarCount(static_cast<int64_t>(std::floor(beat / 4.0)));
+        position.setTimeInSamples(sample);
+        position.setTimeInSeconds(static_cast<double>(sample) / rate);
+        position.setIsPlaying(true); // Standalone live signal chain: transport always rolling.
+        position.setIsRecording(false);
+        position.setIsLooping(false);
+        return position;
+    }
+
+    void prepare(double rate) noexcept {
+        sampleRate.store(std::max(8000.0, rate), std::memory_order_relaxed);
+        samples.store(0, std::memory_order_relaxed);
+        ppq.store(0.0, std::memory_order_relaxed);
+    }
+
+    void beginBlock(double newBpm) noexcept {
+        if (std::isfinite(newBpm))
+            bpm.store(std::clamp(newBpm, 40.0, 250.0), std::memory_order_relaxed);
+    }
+
+    void endBlock(int count) noexcept {
+        if (count <= 0) return;
+        const double rate = sampleRate.load(std::memory_order_relaxed);
+        const double current = bpm.load(std::memory_order_relaxed);
+        ppq.store(ppq.load(std::memory_order_relaxed) +
+                  static_cast<double>(count) * current / (60.0 * rate),
+                  std::memory_order_relaxed);
+        samples.store(samples.load(std::memory_order_relaxed) + count, std::memory_order_relaxed);
+    }
+
+private:
+    std::atomic<double> sampleRate{48000.0};
+    std::atomic<double> bpm{120.0};
+    std::atomic<double> ppq{0.0};
+    std::atomic<int64_t> samples{0};
+};
+
 class VstChain final {
 public:
     static constexpr int preSlots = 4;
@@ -22,6 +77,9 @@ public:
 
     juce::AudioPluginInstance* get(int i) const noexcept {
         return valid(i) ? slots[static_cast<size_t>(i)].processor.get() : nullptr;
+    }
+    juce::File bundlePath(int i) const {
+        return valid(i) ? slots[static_cast<size_t>(i)].bundleFile : juce::File();
     }
     juce::String name(int i) const {
         if (!valid(i)) return {};
@@ -71,7 +129,9 @@ public:
         auto& slot = slots[static_cast<size_t>(i)];
         if (slot.processor && prepared) slot.processor->releaseResources();
         slot.processor = std::move(plugin);
+        slot.processor->setPlayHead(&transport);
         slot.displayName = chosen->name.isNotEmpty() ? chosen->name : bundle.getFileNameWithoutExtension();
+        slot.bundleFile = bundle;
         slot.active.store(true, std::memory_order_release);
         if (prepared && slot.processor)
             prepareProcessor(*slot.processor, sampleRateLive, blockSizeLive);
@@ -88,12 +148,19 @@ public:
         if (s.processor && prepared) s.processor->releaseResources();
         s.processor.reset();
         s.displayName.clear();
+        s.bundleFile = juce::File();
         s.active.store(false, std::memory_order_release);
     }
+
+    // A single musical clock drives all nine slots: samples, PPQ, 4/4, playing, BPM.
+    // Called by the live audio callback once per chunk, NOT by each plugin.
+    void beginBlock(double bpm) noexcept { transport.beginBlock(bpm); }
+    void endBlock(int numSamples) noexcept { transport.endBlock(numSamples); }
 
     void prepare(double sampleRate, int blockSize) {
         sampleRateLive = sampleRate;
         blockSizeLive = blockSize;
+        transport.prepare(sampleRate);
         for (auto& s : slots) {
             if (!s.processor) continue;
             prepareProcessor(*s.processor, sampleRate, blockSize);
@@ -146,6 +213,7 @@ public:
 
 
     void prepareProcessor(juce::AudioPluginInstance& p, double sampleRate, int blockSize) {
+        p.setPlayHead(&transport);
         juce::AudioProcessor::BusesLayout stereo;
         stereo.inputBuses.add(juce::AudioChannelSet::stereo());
         stereo.outputBuses.add(juce::AudioChannelSet::stereo());
@@ -171,10 +239,12 @@ private:
     struct Slot {
         std::unique_ptr<juce::AudioPluginInstance> processor;
         juce::String displayName;
+        juce::File bundleFile;
         std::atomic<bool> active{false};
     };
     static bool valid(int index) noexcept { return index >= 0 && index < totalSlots; }
     juce::AudioPluginFormatManager formats;
+    SculptRigPlayHead transport; // Must outlive all hosted plugin instances.
     std::array<Slot, totalSlots> slots;
     double sampleRateLive = 48000.0;
     int blockSizeLive = 2048;

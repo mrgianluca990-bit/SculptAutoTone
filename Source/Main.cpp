@@ -2,6 +2,7 @@
 #include <juce_dsp/juce_dsp.h>
 #include <NeuralAudio/NeuralModel.h>
 #include "VstChain.h"
+#include "GuitarTuner.h"
 
 #include <array>
 #include <atomic>
@@ -63,7 +64,7 @@ public:
         title.setText("SCULPT  /  GUITAR RIG", juce::dontSendNotification);
         title.setFont(juce::Font(juce::FontOptions(27.f, juce::Font::bold)));
         title.setColour(juce::Label::textColourId, kText);
-        subtitle.setText("NAM  /  VST3  /  CAB IR  /  SCULPT CH     •     BETA 0.9.1", juce::dontSendNotification);
+        subtitle.setText("NAM  /  VST3  /  CAB IR  /  SCULPT CH     •     BETA 1.2", juce::dontSendNotification);
         subtitle.setFont(juce::Font(juce::FontOptions(11.f)));
         subtitle.setColour(juce::Label::textColourId, kWarm);
         status.setText("Rig manuale: scegli i tuoi NAM e i tuoi VST3. Host VST3 corretto e impostazioni audio preservate.", juce::dontSendNotification);
@@ -154,8 +155,8 @@ public:
         tone3000Search.onClick = [this] { openTone3000Search(); };
         tone3000Search.setColour(juce::TextButton::textColourOffId, kText);
         addAndMakeVisible(tone3000Search);
-        rigButton.setButtonText("APRI RIG  /  VST3 PRE · SCULPT CH · POST");
-        rigButton.setTooltip("Nove insert VST3: quattro pre NAM, Sculpt Channel dopo IR, quattro post IR.");
+        rigButton.setButtonText("RIG  /  PRE · SCULPT CH · NAM/CAB · POST");
+        rigButton.setTooltip("Quattro VST3 PRE, Sculpt Channel fisso prima del NAM, quattro VST3 POST.");
         rigButton.setColour(juce::TextButton::textColourOffId, kText);
         rigButton.onClick = [this] { showRigPanel(); };
         addAndMakeVisible(rigButton);
@@ -216,9 +217,39 @@ public:
         setAudioChannels(1, 2);
         // The single-window rig is the main component, not an additional dialog.
         rigPanel = std::make_unique<RigPanel>(*this);
+        // Sculpt Channel is a mandatory fixed insert before NAM. Load installed VST3 automatically.
+        bool sculptFound = false;
+        for (const auto& file : VstChain::installedVst3()) {
+            const auto name = file.getFileNameWithoutExtension().toLowerCase();
+            if (name.contains("sculpt") && name.contains("chan")) {
+                sculptFound = true;
+                loadPluginSlot(VstChain::sculptSlot, file);
+                if (vstChain.get(VstChain::sculptSlot) != nullptr) break;
+            }
+        }
+        if (!sculptFound)
+            status.setText("SCULPT CHANNEL non installato: seleziona il VST3 nello slot dedicato.",
+                           juce::dontSendNotification);
         rigViewport.setViewedComponent(rigPanel.get(), false);
         rigViewport.setScrollBarsShown(true, true);
         addAndMakeVisible(rigViewport);
+        quickTitle.setText("5 PRESET RAPIDI  /  RICHIAMA O MEMORIZZA", juce::dontSendNotification);
+        quickTitle.setColour(juce::Label::textColourId, kWarm);
+        quickTitle.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
+        addAndMakeVisible(quickTitle);
+        for (int i=0;i<5;++i) {
+            quickNames[(size_t)i].setColour(juce::Label::textColourId,kText);
+            quickNames[(size_t)i].setFont(juce::Font(juce::FontOptions(11.f,juce::Font::bold)));
+            quickNames[(size_t)i].setJustificationType(juce::Justification::centredLeft);
+            addAndMakeVisible(quickNames[(size_t)i]);
+            quickRecall[(size_t)i].setButtonText(juce::String(i+1)+"  RICHIAMA");
+            quickRecall[(size_t)i].onClick=[this,i]{loadQuickSlot(i);};
+            addAndMakeVisible(quickRecall[(size_t)i]);
+            quickStore[(size_t)i].setButtonText("MEMORIZZA");
+            quickStore[(size_t)i].onClick=[this,i]{storeQuickSlot(i);};
+            addAndMakeVisible(quickStore[(size_t)i]);
+        }
+        refreshQuickSlots();
         audioSetupOverlay = std::make_unique<AudioSetupOverlay>(deviceManager, [this] { hideAudioSettings(); });
         addChildComponent(audioSetupOverlay.get());
         audioSetupOverlay->setVisible(false);
@@ -258,6 +289,9 @@ public:
         cab.prepare({ sampleRate, static_cast<juce::uint32>(kBlock), 1 });
         cab.reset();
         vstChain.prepare(sampleRate, kBlock);
+        tuner.prepare(sampleRate);
+        tunerMuteGain.reset(sampleRate, 0.015);
+        tunerMuteGain.setCurrentAndTargetValue(tunerMute.load() ? 0.f : 1.f);
         gateEnvelope = 0.f;
         gateGain = 0.f;
         const int chosen=requestedIndex.load(std::memory_order_relaxed);
@@ -275,9 +309,12 @@ public:
         int offset = 0;
         while (offset < count) {
             const int n = std::min(kBlock, count - offset);
+            // Expose the *same* host tempo/PPQ/transport to all VST3s in this block.
+            vstChain.beginBlock(static_cast<double>(tempoBpm.load(std::memory_order_relaxed)));
             const float* input = audio->getReadPointer(0, start + offset);
             // Preserve dry DI for input metering. Tone choice is always manual.
             std::copy_n(input, n, dryInput.begin());
+            tuner.push(dryInput.data(), n); // raw DI ahead of gate and effects
             const float threshold = gainFromDb(gateThresholdDb.load(std::memory_order_relaxed));
             const bool doGate = gateEnabled.load(std::memory_order_relaxed);
             const float attackCoeff = 0.08f;
@@ -292,10 +329,10 @@ public:
                 fxBuffer.setSample(0,j,y);
                 fxBuffer.setSample(1,j,y);
             }
-            // PRE: four independent VST3 inserts. The NAM input is collapsed to mono
-            // after PRE because Neural Amp Modeler expects a single DI channel.
+            // PRE 1-4 -> SCULPT CHANNEL (fixed) -> NAM, which requires mono DI.
             juce::AudioBuffer<float> vstView(fxBuffer.getArrayOfWritePointers(), 2, n);
             for (int si=0;si<4;++si) vstChain.process(si, vstView);
+            vstChain.process(VstChain::sculptSlot, vstView);
             const auto* preL=fxBuffer.getReadPointer(0);
             const auto* preR=fxBuffer.getReadPointer(1);
             for (int j=0;j<n;++j)
@@ -308,8 +345,8 @@ public:
             }
             if (activeIndex >= 0) {
                 auto& entry = captures[static_cast<size_t>(activeIndex)];
-                const float gi = gainFromDb(juce::jlimit(-18.f, 18.f, entry.recommendedInput));
-                const float go = 0.25f * gainFromDb(juce::jlimit(-18.f, 18.f, entry.recommendedOutput));
+                const float gi = gainFromDb(juce::jlimit(-24.f, 24.f, entry.recommendedInput + namInputGainDb.load(std::memory_order_relaxed)));
+                const float go = 0.25f * gainFromDb(juce::jlimit(-24.f, 24.f, entry.recommendedOutput + namOutputGainDb.load(std::memory_order_relaxed)));
                 for (int i=0;i<n;++i) driven[static_cast<size_t>(i)] = inputScratch[static_cast<size_t>(i)] * gi;
                 entry.model->Process(driven.data(), outA.data(), static_cast<size_t>(n));
                 for (int i=0;i<n;++i) outA[static_cast<size_t>(i)] *= go;
@@ -320,8 +357,8 @@ public:
                 float oldGain=1.0f;
                 if (fadingFrom >= 0) {
                     auto& oldEntry = captures[static_cast<size_t>(fadingFrom)];
-                    const float gi = gainFromDb(juce::jlimit(-18.f,18.f,oldEntry.recommendedInput));
-                    oldGain = 0.25f * gainFromDb(juce::jlimit(-18.f,18.f,oldEntry.recommendedOutput));
+                    const float gi = gainFromDb(juce::jlimit(-24.f,24.f,oldEntry.recommendedInput + namInputGainDb.load(std::memory_order_relaxed)));
+                    oldGain = 0.25f * gainFromDb(juce::jlimit(-24.f,24.f,oldEntry.recommendedOutput + namOutputGainDb.load(std::memory_order_relaxed)));
                     for (int i=0;i<n;++i) driven[static_cast<size_t>(i)] = inputScratch[static_cast<size_t>(i)] * gi;
                     oldEntry.model->Process(driven.data(), outB.data(), static_cast<size_t>(n));
                 } else {
@@ -351,21 +388,21 @@ public:
                     outA[static_cast<size_t>(i)] = lowpassZ;
                 }
             }
-            // Dedicated SCULPT CHANNEL after cabinet IR, then four independent POST VST3.
+            // Cabinet IR -> four independent POST VST3, preserving their stereo output.
             fxBuffer.copyFrom(0, 0, outA.data(), n);
             fxBuffer.copyFrom(1, 0, outA.data(), n);
-            vstChain.process(4, vstView);
             for (int si=5;si<9;++si) vstChain.process(si, vstView);
             // Final master gain: after all nine VST3 inserts; preserve stereo post effects.
             const float masterDb = masterGainDb.load(std::memory_order_relaxed);
             masterGain.setTargetValue(masterDb <= -60.f ? 0.f : gainFromDb(masterDb));
+            tunerMuteGain.setTargetValue(tunerMute.load(std::memory_order_relaxed) ? 0.f : 1.f);
             auto* left = audio->getWritePointer(0, start + offset);
             auto* right = numChannels > 1 ? audio->getWritePointer(1, start + offset) : nullptr;
             const auto* processedL = fxBuffer.getReadPointer(0);
             const auto* processedR = fxBuffer.getReadPointer(1);
             double outEnergy = 0.0;
             for (int i=0;i<n;++i) {
-                const float gain = masterGain.getNextValue();
+                const float gain = masterGain.getNextValue() * tunerMuteGain.getNextValue();
                 const float l = juce::jlimit(-0.85f, 0.85f, processedL[i] * gain);
                 const float r = right != nullptr ? juce::jlimit(-0.85f,0.85f,processedR[i]*gain) : l;
                 left[i] = l;
@@ -384,6 +421,7 @@ public:
             }
             levelDb.store(static_cast<float>(20.0*std::log10(
                 std::max(1.e-8,std::sqrt(energy/std::max(1,n))))));
+            vstChain.endBlock(n); // Advance timeline exactly once, after PRE + POST.
             offset += n;
         }
     }
@@ -392,13 +430,28 @@ public:
 
     void paint(juce::Graphics& g) override {
         g.fillAll(kBg);
+        const float footerY=(float)getHeight()-106.f;
+        g.setColour(kPanel);g.fillRect(0,(int)footerY,getWidth(),106);
+        g.setColour(kAccent.withAlpha(0.55f));g.drawLine(0,footerY,(float)getWidth(),footerY,1.5f);
     }
 
     void resized() override {
         const auto bounds = getLocalBounds();
-        rigViewport.setBounds(bounds);
+        constexpr int bankHeight = 106;
+        rigViewport.setBounds(bounds.withTrimmedBottom(bankHeight));
         if (rigPanel != nullptr)
-            rigPanel->setSize(juce::jmax(1460, bounds.getWidth()), juce::jmax(790, bounds.getHeight()));
+            rigPanel->setSize(juce::jmax(1460, bounds.getWidth()),
+                              juce::jmax(775, bounds.getHeight()-bankHeight));
+        const int footerTop=bounds.getBottom()-bankHeight;
+        quickTitle.setBounds(22,footerTop+4,700,16);
+        const int pad=18, gap=8;
+        const int tile=(bounds.getWidth()-2*pad-4*gap)/5;
+        for(int i=0;i<5;++i){
+            const int x=pad+i*(tile+gap);
+            quickNames[(size_t)i].setBounds(x+4,footerTop+21,tile-8,19);
+            quickRecall[(size_t)i].setBounds(x,footerTop+46,(tile*2)/3-4,38);
+            quickStore[(size_t)i].setBounds(x+(tile*2)/3,footerTop+46,tile/3,38);
+        }
         if (audioSetupOverlay != nullptr) {
             const int width = juce::jmin(600, juce::jmax(430, bounds.getWidth()-48));
             const int height = juce::jmin(510, juce::jmax(410, bounds.getHeight()-48));
@@ -435,7 +488,7 @@ private:
                 addAndMakeVisible(l);
             };
             label(brand,"SCULPT / GUITAR RIG",24.f,kText);
-            label(subtitle,"NAM  /  VST3  /  SCULPT CHANNEL  /  ONE WINDOW",11.5f,kWarm);
+            label(subtitle,"INPUT  /  TUNER  /  PRE VST3  /  SCULPT CH  /  NAM/CAB  /  POST VST3",11.5f,kWarm);
             label(status,"",12.f,kMuted);
             label(inMeter,"-90.0 dBFS",15.f,kGreen);
             label(outMeter,"-90.0 dBFS",15.f,kGreen);
@@ -443,8 +496,25 @@ private:
             label(irName,"IR: NON CARICATA",12.f,kMuted);
             label(sculptName,"SCULPT CH: NON CARICATO",11.f,kMuted);
             label(gateHeading,"NOISE GATE",12.f,kWarm);
+            label(tunerHeading,"ACCORDATORE  /  DI",11.7f,kWarm);
+            label(tunerNote,"--",30.f,kText);
+            tunerNote.setJustificationType(juce::Justification::centred);
+            label(tunerInfo,"-- Hz / -- cents",11.f,kMuted);
+            tunerInfo.setJustificationType(juce::Justification::centred);
+            tunerButton.setButtonText("TUNER / MUTE");
+            tunerButton.onClick = [this] {
+                owner.tunerMute.store(!owner.tunerMute.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                updateLabels();
+            };
+            addAndMakeVisible(tunerButton);
             label(masterHeading,"MASTER OUTPUT",12.f,kWarm);
             label(masterReadout,"0.0 dB",14.f,kText);
+            label(tapHeading,"TAP / HOST SYNC",12.f,kWarm);
+            label(tapReadout,"120 BPM",22.f,kText);
+            tapReadout.setJustificationType(juce::Justification::centred);
+            tapButton.setButtonText("TAP TO SYNC");
+            tapButton.onClick = [this] { recordTap(); };
+            addAndMakeVisible(tapButton);
             label(sculptHeading,"PARAMETRI DEL PLUGIN",11.f,kMuted);
             label(preHeading,"PRE / 4 VST3",12.5f,kWarm);
             label(postHeading,"POST / 4 VST3",12.5f,kWarm);
@@ -462,6 +532,27 @@ private:
             toneSearch.setButtonText("CERCA ↗");
             toneSearch.onClick = [this] { openToneSearch(); };
             addAndMakeVisible(toneSearch);
+            label(presetHeading,"PRESET RIG",11.5f,kWarm);
+            presetPicker.addItem("NUOVO PRESET...",1);
+            presetPicker.onChange=[this]{
+                const int id=presetPicker.getSelectedId();
+                if(id>=2 && id-2<presetCatalog.size()){
+                    const auto name=presetCatalog[id-2];
+                    if(owner.loadNamedPreset(name)) presetNameEditor.setText(name,juce::dontSendNotification);
+                } else if(id==1) presetNameEditor.clear();
+            };
+            addAndMakeVisible(presetPicker);
+            presetNameEditor.setTextToShowWhenEmpty("Nome preset...",kMuted);
+            presetNameEditor.setColour(juce::TextEditor::backgroundColourId,kPanelAlt);
+            presetNameEditor.setColour(juce::TextEditor::textColourId,kText);
+            presetNameEditor.onReturnKey=[this]{savePreset();};
+            addAndMakeVisible(presetNameEditor);
+            presetSave.setButtonText("SALVA");presetSave.onClick=[this]{savePreset();};
+            addAndMakeVisible(presetSave);
+            presetRefresh.setButtonText("↻");presetRefresh.setTooltip("Aggiorna l'elenco preset");
+            presetRefresh.onClick=[this]{refreshPresets(true);};
+            addAndMakeVisible(presetRefresh);
+            refreshPresets(true);
 
             inputSetup.setButtonText("SETUP AUDIO ▾");
             outputSetup.setButtonText("SETUP AUDIO ▾");
@@ -496,6 +587,21 @@ private:
             loadIr.setButtonText("CARICA IR..."); loadIr.onClick=[this]{owner.chooseIR();}; addAndMakeVisible(loadIr);
             prevNam.setButtonText("◀"); prevNam.onClick=[this]{owner.changeNam(-1);}; addAndMakeVisible(prevNam);
             nextNam.setButtonText("▶"); nextNam.onClick=[this]{owner.changeNam(1);}; addAndMakeVisible(nextNam);
+            label(namInputHeading,"NAM INPUT / dB",11.f,kWarm);
+            label(namOutputHeading,"NAM OUTPUT / dB",11.f,kWarm);
+            for(int i=0;i<2;++i){
+                auto& slider=namGains[(size_t)i];
+                slider.setSliderStyle(juce::Slider::LinearHorizontal);
+                slider.setTextBoxStyle(juce::Slider::TextBoxRight,false,53,23);
+                slider.setRange(-12.,12.,.5);
+                slider.setTextValueSuffix(" dB");
+                slider.setValue(0.,juce::dontSendNotification);
+                slider.onValueChange=[this,i]{
+                    if(i==0)owner.namInputGainDb.store((float)namGains[0].getValue());
+                    else owner.namOutputGainDb.store((float)namGains[1].getValue());
+                };
+                addAndMakeVisible(slider);
+            }
 
             // Install a VST3 in any slot using a dropdown, not a separate rig window.
             pluginPaths = VstChain::installedVst3();
@@ -525,8 +631,15 @@ private:
                 menu.setSelectedId(1,juce::dontSendNotification);
                 addAndMakeVisible(menu);
                 auto& edit=editors[(size_t)i]; edit.setButtonText("EDIT"); edit.onClick=[this,index]{owner.openPluginEditor(index);}; addAndMakeVisible(edit);
-                auto& on=power[(size_t)i]; on.setButtonText("ON/OFF"); on.onClick=[this,index]{owner.vstChain.enable(index,!owner.vstChain.enabled(index)); updateLabels();}; addAndMakeVisible(on);
-                auto& clear=clearButtons[(size_t)i]; clear.setButtonText("X"); clear.onClick=[this,index]{owner.removeVstSlot(index);slotMenus[(size_t)index].setSelectedId(1,juce::dontSendNotification); updateLabels();}; addAndMakeVisible(clear);
+                auto& on=power[(size_t)i]; on.setButtonText("ON/OFF"); on.onClick=[this,index]{
+                    if (index == VstChain::sculptSlot) return;
+                    owner.vstChain.enable(index,!owner.vstChain.enabled(index)); updateLabels();
+                }; addAndMakeVisible(on);
+                auto& clear=clearButtons[(size_t)i]; clear.setButtonText("X"); clear.onClick=[this,index]{
+                    if (index == VstChain::sculptSlot) return;
+                    owner.removeVstSlot(index);slotMenus[(size_t)index].setSelectedId(1,juce::dontSendNotification); updateLabels();
+                }; addAndMakeVisible(clear);
+                if(i==VstChain::sculptSlot) {on.setVisible(false); clear.setVisible(false);}
             }
             const char* names[]={"Low","Mid","High","Presence","Output"};
             for(int k=0;k<5;++k){
@@ -558,7 +671,7 @@ private:
             g.setGradientFill(juce::ColourGradient(kPanelAlt,0,0,kBg,0,88,false));
             g.fillRect(top);
             g.setColour(kAccent);g.fillRoundedRectangle(juce::Rectangle<float>(18.f,16.f,5.f,43.f),2.f);
-            auto headings=std::array<juce::String,6>{{"01 / INPUT","02 / PRE VST3","03 / NAM / CAB","04 / SCULPT CH","05 / POST VST3","06 / OUTPUT"}};
+            auto headings=std::array<juce::String,6>{{"01 / INPUT","02 / PRE VST3","03 / SCULPT CH (FISSO)","04 / NAM / CAB","05 / POST VST3","06 / OUTPUT"}};
             for(size_t i=0;i<sections.size();++i){
                 auto r=sections[i].toFloat();
                 if(r.isEmpty())continue;
@@ -576,6 +689,22 @@ private:
                 if(amt>.005f)g.fillRoundedRectangle(bar.withWidth(bar.getWidth()*amt),3.f);
             };
             meter(0,owner.levelDb.load());meter(5,owner.outputDb.load());
+            // Guitar tuner cents meter, centred on perfect tuning (0 cents).
+            if (!sections[0].isEmpty()) {
+                const auto in = sections[0].reduced(18,0);
+                const float left = (float) in.getX(), width = (float) in.getWidth();
+                const float centre = left + width*0.5f;
+                const float y = (float) sections[0].getY() + 294.f;
+                g.setColour(kMuted.withAlpha(0.55f));
+                g.drawLine(left,y,left+width,y,2.f);
+                g.setColour(kGreen);
+                g.drawLine(centre,y-6.f,centre,y+6.f,1.5f);
+                if (tunerPitchValid) {
+                    const float marker = centre + juce::jlimit(-50.f,50.f,tunerCurrentCents)/50.f * width*0.5f;
+                    g.setColour(std::abs(tunerCurrentCents) < 5.f ? kGreen : kWarm);
+                    g.fillEllipse(marker-4.5f,y-4.5f,9.f,9.f);
+                }
+            }
             for(int i=0;i<9;++i){
                 auto r=slotRects[(size_t)i].toFloat(); if(r.isEmpty())continue;
                 const bool active=owner.vstChain.enabled(i);
@@ -593,32 +722,45 @@ private:
         void resized() override {
             const int gap=9,pad=14;
             const int width=getWidth()-2*pad-5*gap;
-            const std::array<float,6> fractions{{.117f,.23f,.166f,.14f,.23f,.117f}};
+            const std::array<float,6> fractions{{.117f,.23f,.14f,.166f,.23f,.117f}};
             int x=pad;
             const int y=94, h=getHeight()-94-47;
             for(int i=0;i<6;++i){
                 const int w=i==5?getWidth()-pad-x:(int)std::round(width*fractions[(size_t)i]);
                 sections[(size_t)i]={x,y,w,h};x+=w+gap;
             }
-            auto input=sections[0].reduced(12,0),pre=sections[1].reduced(10,0),nam=sections[2].reduced(12,0);
-            auto sculpt=sections[3].reduced(9,0),post=sections[4].reduced(10,0),output=sections[5].reduced(12,0);
+            auto input=sections[0].reduced(12,0),pre=sections[1].reduced(10,0),sculpt=sections[2].reduced(9,0);
+            auto nam=sections[3].reduced(12,0),post=sections[4].reduced(10,0),output=sections[5].reduced(12,0);
             brand.setBounds(32,15,385,31);
             subtitle.setBounds(33,52,430,19);
+            const int middle=getWidth()/2;
+            presetHeading.setBounds(middle-296,14,88,26);
+            presetPicker.setBounds(middle-208,15,169,32);
+            presetNameEditor.setBounds(middle-33,15,146,32);
+            presetSave.setBounds(middle+119,15,77,32);
+            presetRefresh.setBounds(middle+201,15,34,32);
             toneLabel.setBounds(getWidth()-514,17,90,19);
             toneQuery.setBounds(getWidth()-425,15,252,31);
             toneSearch.setBounds(getWidth()-166,15,140,31);
             status.setBounds(getWidth()/3,54,getWidth()*2/3-38,22);
             inputSetup.setBounds(input.getX(),y+48,input.getWidth(),31);
             inMeter.setBounds(input.getX(),y+108,input.getWidth(),20);
-            gateHeading.setBounds(input.getX(),y+191,input.getWidth(),20);
-            gateBypass.setBounds(input.getX(),y+225,input.getWidth(),33);
-            gateThreshold.setBounds(input.getX(),y+275,input.getWidth(),68);
+            tunerHeading.setBounds(input.getX(),y+181,input.getWidth(),20);
+            tunerNote.setBounds(input.getX(),y+207,input.getWidth(),55);
+            tunerInfo.setBounds(input.getX(),y+263,input.getWidth(),24);
+            tunerButton.setBounds(input.getX(),y+309,input.getWidth(),36);
+            gateHeading.setBounds(input.getX(),y+395,input.getWidth(),20);
+            gateBypass.setBounds(input.getX(),y+429,input.getWidth(),33);
+            gateThreshold.setBounds(input.getX(),y+482,input.getWidth(),65);
             outputSetup.setBounds(output.getX(),y+48,output.getWidth(),31);
             outMeter.setBounds(output.getX(),y+108,output.getWidth(),20);
             masterHeading.setBounds(output.getX(),y+191,output.getWidth(),19);
             masterSlider.setBounds(output.getX()+output.getWidth()/2-30,y+226,60,215);
-            masterReadout.setBounds(output.getX(),y+463,output.getWidth(),25);
+            masterReadout.setBounds(output.getX(),y+460,output.getWidth(),25);
             masterReadout.setJustificationType(juce::Justification::centred);
+            tapHeading.setBounds(output.getX(),y+518,output.getWidth(),24);
+            tapReadout.setBounds(output.getX(),y+551,output.getWidth(),34);
+            tapButton.setBounds(output.getX(),y+602,output.getWidth(),40);
             namName.setBounds(nam.getX(),y+50,nam.getWidth(),42);
             namPicker.setBounds(nam.getX(),y+105,nam.getWidth(),32);
             prevNam.setBounds(nam.getX(),y+148,35,30);
@@ -626,6 +768,10 @@ private:
             loadNam.setBounds(nam.getX()+80,y+148,nam.getWidth()-80,30);
             loadIr.setBounds(nam.getX(),y+215,nam.getWidth(),33);
             irName.setBounds(nam.getX(),y+260,nam.getWidth(),52);
+            namInputHeading.setBounds(nam.getX(),y+346,nam.getWidth(),18);
+            namGains[0].setBounds(nam.getX(),y+371,nam.getWidth(),37);
+            namOutputHeading.setBounds(nam.getX(),y+426,nam.getWidth(),18);
+            namGains[1].setBounds(nam.getX(),y+451,nam.getWidth(),37);
 
             // Four pedal inserts in each bank; compact independent controls per row.
             const int top=y+47, usable=h-62, rowH=(usable-24)/4;
@@ -652,6 +798,21 @@ private:
             labelizeLocation(y);
         }
     private:
+        void savePreset(){
+            const auto name=presetNameEditor.getText().trim();
+            if(owner.saveNamedPreset(name)) refreshPresets(true);
+        }
+        void refreshPresets(bool force){
+            const auto names=owner.namedPresetNames();
+            if(!force && names==presetCatalog)return;
+            presetCatalog=names;
+            presetPicker.clear(juce::dontSendNotification);
+            presetPicker.addItem("NUOVO PRESET...",1);
+            for(int i=0;i<names.size();++i)presetPicker.addItem(names[i],i+2);
+            const int id=names.indexOf(owner.currentPresetName);
+            presetPicker.setSelectedId(id>=0?id+2:1,juce::dontSendNotification);
+            if(owner.currentPresetName.isNotEmpty())presetNameEditor.setText(owner.currentPresetName,juce::dontSendNotification);
+        }
         void labelizeLocation(int){}
         void layoutSlot(int index,juce::Rectangle<int> r){
             slotRects[(size_t)index]=r;
@@ -664,6 +825,11 @@ private:
             editors[(size_t)index].setBounds(x,rowBottom,editW,27);
             power[(size_t)index].setBounds(x+editW+5,rowBottom,juce::jmax(46,w-editW-45),27);
             clearButtons[(size_t)index].setBounds(x+w-32,rowBottom,32,27);
+            if (index == VstChain::sculptSlot) {
+                editors[(size_t)index].setBounds(x,rowBottom,w,27);
+                power[(size_t)index].setBounds(0,0,0,0);
+                clearButtons[(size_t)index].setBounds(0,0,0,0);
+            }
         }
         void openToneSearch(){
             owner.tone3000Query.setText(toneQuery.getText(),juce::dontSendNotification);
@@ -691,15 +857,62 @@ private:
                 }
             }
         }
+        void recordTap() {
+            const double now = juce::Time::getMillisecondCounterHiRes();
+            if (lastTapMs > 0.0) {
+                const double dt = now - lastTapMs;
+                // Reject accidental double-taps. Reset *tap history*, not host BPM,
+                // after inactivity: plugins never lose a valid tempo.
+                if (dt >= 240.0 && dt <= 1500.0) {
+                    tapIntervals[static_cast<std::size_t>(tapCursor % 4)] = dt;
+                    ++tapCursor;
+                    tapCount = std::min(tapCount + 1, 4);
+                    double sum = 0.0;
+                    for (int k = 0; k < tapCount; ++k)
+                        sum += tapIntervals[static_cast<std::size_t>(k)];
+                    const double avgMs = sum / tapCount;
+                    const int bpm = juce::jlimit(40, 250, static_cast<int>(std::lround(60000.0 / avgMs)));
+                    owner.tempoBpm.store(bpm, std::memory_order_relaxed);
+                } else if (dt > 1500.0) {
+                    tapCount = 0;
+                    tapCursor = 0;
+                }
+            }
+            lastTapMs = now;
+            updateLabels();
+        }
         void timerCallback() override {updateLabels();}
         void updateLabels(){
             inMeter.setText(juce::String(owner.levelDb.load(),1)+" dBFS",juce::dontSendNotification);
             outMeter.setText(juce::String(owner.outputDb.load(),1)+" dBFS",juce::dontSendNotification);
             gateBypass.setButtonText(owner.gateEnabled.load()?"GATE ON":"GATE OFF");
+            if(!gateThreshold.isMouseButtonDown()) gateThreshold.setValue(owner.gateThresholdDb.load(),juce::dontSendNotification);
+            const bool mute = owner.tunerMute.load(std::memory_order_relaxed);
+            tunerButton.setButtonText(mute ? "TUNER ON / MUTE" : "TUNER / AUDIO ON");
+            tunerButton.setToggleState(mute, juce::dontSendNotification);
+            const auto pitch = owner.tuner.detect();
+            tunerPitchValid = pitch.midi >= 0 && pitch.confidence > 0.65f;
+            tunerCurrentCents = pitch.cents;
+            if (tunerPitchValid) {
+                static constexpr const char* notes[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+                const int noteIndex = ((pitch.midi % 12) + 12) % 12;
+                tunerNote.setText(juce::String(notes[noteIndex]) + juce::String(pitch.midi / 12 - 1),juce::dontSendNotification);
+                tunerInfo.setText(juce::String(pitch.hz,1) + " Hz  " + (pitch.cents>=0.f?"+":"") +
+                    juce::String(pitch.cents,1) + " cents",juce::dontSendNotification);
+            } else {
+                tunerNote.setText("--",juce::dontSendNotification);
+                tunerInfo.setText("Attendo una nota...",juce::dontSendNotification);
+            }
+            const int bpm = owner.tempoBpm.load(std::memory_order_relaxed);
+            tapReadout.setText(bpm > 0 ? juce::String(bpm) + " BPM" : juce::String("-- BPM"),juce::dontSendNotification);
             const auto m=owner.masterGainDb.load();
             masterSlider.setValue(m,juce::dontSendNotification);
             masterReadout.setText(m<=-60.f?"MUTE":juce::String(m,1)+" dB",juce::dontSendNotification);
             status.setText(owner.status.getText(),juce::dontSendNotification);
+            if(lastLoadedName!=owner.currentPresetName){
+                lastLoadedName=owner.currentPresetName;
+                refreshPresets(true);
+            }
             const int selected=owner.requestedIndex.load(std::memory_order_relaxed);
             juce::StringArray names;
             for(const auto& c:owner.captures)names.add(c.name);
@@ -711,16 +924,29 @@ private:
             namPicker.setSelectedId(selected<0?1:selected+2,juce::dontSendNotification);
             namName.setText(selected>=0 && selected<(int)owner.captures.size()?owner.captures[(size_t)selected].name:"BYPASS / DI",juce::dontSendNotification);
             irName.setText(owner.irName.isNotEmpty()?"IR: "+owner.irName:"IR: NON CARICATA",juce::dontSendNotification);
+            if(!namGains[0].isMouseButtonDown())namGains[0].setValue(owner.namInputGainDb.load(),juce::dontSendNotification);
+            if(!namGains[1].isMouseButtonDown())namGains[1].setValue(owner.namOutputGainDb.load(),juce::dontSendNotification);
             prevNam.setEnabled(selected>0); nextNam.setEnabled(selected<(int)owner.captures.size()-1);
-            sculptName.setText(owner.vstChain.name(4).isNotEmpty()?owner.vstChain.name(4):"CARICA SCULPT CHANNEL",juce::dontSendNotification);
+            sculptName.setText(owner.vstChain.name(4).isNotEmpty() ? "ON / " + owner.vstChain.name(4)
+                               : "SCULPT CH: CARICA VST3",juce::dontSendNotification);
             for(int i=0;i<9;++i){
                 const auto name=owner.vstChain.name(i);
                 slotStatus[(size_t)i].setText(name.isNotEmpty()?name:"NESSUN PLUGIN",juce::dontSendNotification);
+                // Reflect plugins recalled from disk in the visible drop-down too.
+                int selectedMenuId=1;
+                const auto bundle=owner.vstChain.bundlePath(i);
+                for(int j=0;j<(int)pluginMap[(size_t)i].size();++j){
+                    const auto path=pluginPaths.getReference(pluginMap[(size_t)i][(size_t)j]);
+                    if(path==bundle && bundle.exists()) {selectedMenuId=j+2;break;}
+                }
+                if(slotMenus[(size_t)i].getSelectedId()!=selectedMenuId)
+                    slotMenus[(size_t)i].setSelectedId(selectedMenuId,juce::dontSendNotification);
                 editors[(size_t)i].setEnabled(name.isNotEmpty());
-                power[(size_t)i].setEnabled(name.isNotEmpty());
-                clearButtons[(size_t)i].setEnabled(name.isNotEmpty());
+                power[(size_t)i].setEnabled(i != VstChain::sculptSlot && name.isNotEmpty());
+                clearButtons[(size_t)i].setEnabled(i != VstChain::sculptSlot && name.isNotEmpty());
                 power[(size_t)i].setButtonText(owner.vstChain.enabled(i)?"ON":"BYPASS");
                 power[(size_t)i].setToggleState(owner.vstChain.enabled(i),juce::dontSendNotification);
+                if (i == VstChain::sculptSlot) {power[(size_t)i].setVisible(false);clearButtons[(size_t)i].setVisible(false);}
             }
             updatingKnobs=true;
             for(int k=0;k<5;++k){
@@ -742,13 +968,27 @@ private:
         }
         GuitarRigWindow& owner;
         juce::Array<juce::File> pluginPaths;
+        juce::Label presetHeading,namInputHeading,namOutputHeading;
+        juce::ComboBox presetPicker;
+        juce::TextEditor presetNameEditor;
+        juce::TextButton presetSave,presetRefresh;
+        juce::StringArray presetCatalog;
+        juce::String lastLoadedName;
+        std::array<juce::Slider,2> namGains;
         std::array<std::vector<int>,9> pluginMap;
         std::array<juce::Rectangle<int>,6> sections;
         std::array<juce::Rectangle<int>,9> slotRects;
         juce::StringArray cachedNamNames;
         bool updatingKnobs=false;
+        bool tunerPitchValid=false;
+        float tunerCurrentCents=0.f;
         std::array<juce::String,5> paramNames;
         juce::Label brand,subtitle,status,inMeter,outMeter,namName,irName,sculptName,gateHeading,masterHeading,masterReadout,sculptHeading;
+        juce::Label tunerHeading,tunerNote,tunerInfo,tapHeading,tapReadout;
+        juce::TextButton tunerButton,tapButton;
+        double lastTapMs = 0.0;
+        std::array<double,4> tapIntervals{};
+        int tapCount = 0, tapCursor = 0;
         juce::Label preHeading,postHeading,namHeading,inputHeading,outputHeading,sculptSectionHeading,toneLabel;
         juce::TextEditor toneQuery;
         juce::TextButton toneSearch,inputSetup,outputSetup,gateBypass,loadNam,loadIr,prevNam,nextNam,variation;
@@ -839,6 +1079,7 @@ private:
         }
     }
     void removeVstSlot(int slot) {
+        if (slot == VstChain::sculptSlot) return; // fixed module cannot be removed
         if(activePluginEditorSlot==slot){activePluginWindow.reset();activePluginEditorSlot=-1;}
         {
             const juce::ScopedLock lock(deviceManager.getAudioCallbackLock());
@@ -899,16 +1140,269 @@ private:
         });
     }
 
+    // Presets are self-contained XML snapshots of host parameters and VST3 state blobs.
+    // Referenced NAM, IR and plugin bundles must remain installed at saved paths.
+    juce::File presetDirectory() const {
+        auto root=juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                        .getChildFile("Sculpt Guitar Rig").getChildFile("Presets");
+        return root;
+    }
+    juce::File quickDirectory() const { return presetDirectory().getChildFile("QuickSlots"); }
+    juce::File namedPresetFile(const juce::String& name) const {
+        return presetDirectory().getChildFile(juce::File::createLegalFileName(name)+".sgrig");
+    }
+    juce::File quickPresetFile(int index) const {
+        return quickDirectory().getChildFile("Slot"+juce::String(index+1)+".sgrig");
+    }
+    juce::StringArray namedPresetNames() const {
+        juce::StringArray names;
+        const auto files=presetDirectory().findChildFiles(juce::File::findFiles,false,"*.sgrig");
+        for(const auto& f:files)names.add(f.getFileNameWithoutExtension());
+        names.sort(true);
+        return names;
+    }
+    // Serialising plugin state calls vendor code; stop audio callbacks during that action.
+    std::unique_ptr<juce::XmlElement> snapshotRig(const juce::String& displayName) {
+        auto root=std::make_unique<juce::XmlElement>("SCULPT_RIG_PRESET");
+        root->setAttribute("version",1);
+        root->setAttribute("name",displayName);
+        root->setAttribute("gate",gateEnabled.load());
+        root->setAttribute("gateDb",(double)gateThresholdDb.load());
+        root->setAttribute("masterDb",(double)masterGainDb.load());
+        root->setAttribute("bpm",tempoBpm.load());
+        root->setAttribute("namInputDb",(double)namInputGainDb.load());
+        root->setAttribute("namOutputDb",(double)namOutputGainDb.load());
+        root->setAttribute("irPath",irLoaded.load()?irFile.getFullPathName():juce::String());
+        auto* nam=root->createNewChildElement("NAM_LIBRARY");
+        {
+            const juce::ScopedLock lock(deviceManager.getAudioCallbackLock());
+            const int selected=requestedIndex.load();
+            nam->setAttribute("selectedPath",selected>=0 && selected<(int)captures.size()
+                                      ? captures[(size_t)selected].file.getFullPathName() : juce::String());
+            for(const auto& c:captures){
+                auto* item=nam->createNewChildElement("CAPTURE");
+                item->setAttribute("file",c.file.getFullPathName());
+            }
+            auto* plugins=root->createNewChildElement("PLUGINS");
+            for(int i=0;i<VstChain::totalSlots;++i){
+                auto* entry=plugins->createNewChildElement("SLOT");
+                entry->setAttribute("index",i);
+                entry->setAttribute("enabled",i==VstChain::sculptSlot || vstChain.enabled(i));
+                entry->setAttribute("file",vstChain.bundlePath(i).getFullPathName());
+                if(auto* processor=vstChain.get(i)){
+                    juce::MemoryBlock state;
+                    processor->getStateInformation(state);
+                    entry->setAttribute("state",state.toBase64Encoding());
+                }
+            }
+        }
+        return root;
+    }
+    bool savePresetFile(const juce::File& file,const juce::String& name){
+        auto document=snapshotRig(name);
+        if(file.getParentDirectory().createDirectory().failed()){
+            status.setText("PRESET: impossibile creare la cartella di salvataggio.",juce::dontSendNotification);
+            return false;
+        }
+        juce::TemporaryFile temp(file);
+        if(!temp.getFile().replaceWithText(document->toString()) ||
+           !temp.overwriteTargetFileWithTemporary()){
+            status.setText("PRESET: errore di scrittura su disco.",juce::dontSendNotification);
+            return false;
+        }
+        return true;
+    }
+    bool saveNamedPreset(juce::String name){
+        name=name.trim();
+        if(name.isEmpty() || name.length()>64){
+            status.setText("Inserisci un nome preset da 1 a 64 caratteri.",juce::dontSendNotification);
+            return false;
+        }
+        name=juce::File::createLegalFileName(name);
+        if(name.isEmpty())return false;
+        if(!savePresetFile(namedPresetFile(name),name))return false;
+        currentPresetName=name;
+        status.setText("PRESET SALVATO: "+name,juce::dontSendNotification);
+        refreshQuickSlots();
+        return true;
+    }
+    bool storeQuickSlot(int index){
+        if(index<0 || index>=5)return false;
+        const auto name=currentPresetName.isNotEmpty() ? currentPresetName : juce::String("Rig ")+juce::String(index+1);
+        if(!savePresetFile(quickPresetFile(index),name))return false;
+        status.setText("MEMORIZZATO SLOT "+juce::String(index+1)+": "+name,juce::dontSendNotification);
+        refreshQuickSlots();
+        return true;
+    }
+    void refreshQuickSlots(){
+        for(int i=0;i<5;++i){
+            const auto file=quickPresetFile(i);
+            juce::String name="VUOTO";
+            if(file.existsAsFile()){
+                auto xml=juce::XmlDocument::parse(file);
+                if(xml && xml->hasTagName("SCULPT_RIG_PRESET"))
+                    name=xml->getStringAttribute("name", "Preset "+juce::String(i+1));
+            }
+            quickNames[(size_t)i].setText(juce::String(i+1)+"  /  "+name,juce::dontSendNotification);
+            quickRecall[(size_t)i].setEnabled(file.existsAsFile());
+        }
+    }
+    bool loadNamedPreset(const juce::String& name){
+        const bool ok=loadPresetFile(namedPresetFile(name));
+        if(ok)currentPresetName=name;
+        return ok;
+    }
+    bool loadQuickSlot(int index){
+        if(index<0 || index>=5)return false;
+        const bool ok=loadPresetFile(quickPresetFile(index));
+        if(ok) status.setText("RICHIAMATO SLOT "+juce::String(index+1),juce::dontSendNotification);
+        return ok;
+    }
+    bool loadPresetFile(const juce::File& file){
+        if(!file.existsAsFile()){
+            status.setText("PRESET: file non trovato.",juce::dontSendNotification);return false;
+        }
+        auto root=juce::XmlDocument::parse(file);
+        if(!root || !root->hasTagName("SCULPT_RIG_PRESET") || root->getIntAttribute("version")!=1){
+            status.setText("PRESET: formato sconosciuto o file danneggiato.",juce::dontSendNotification);return false;
+        }
+        auto* nam=root->getChildByName("NAM_LIBRARY");
+        auto* plugins=root->getChildByName("PLUGINS");
+        if(!nam || !plugins){
+            status.setText("PRESET: NAM o VST3 non descritti nel file.",juce::dontSendNotification);return false;
+        }
+        // Validate *all* referenced files before touching any running slot.
+        juce::Array<juce::File> namFiles;
+        for(auto* node=nam->getFirstChildElement();node!=nullptr;node=node->getNextElement()){
+            if(!node->hasTagName("CAPTURE"))continue;
+            juce::File capture(node->getStringAttribute("file"));
+            if(!capture.existsAsFile()){
+                status.setText("PRESET: NAM mancante: "+capture.getFullPathName(),juce::dontSendNotification);
+                return false;
+            }
+            namFiles.add(capture);
+        }
+        struct SlotState {juce::String path,encoded;bool enabled=false;};
+        std::array<SlotState,VstChain::totalSlots> entries;
+        std::array<bool,VstChain::totalSlots> seen{};
+        for(auto* node=plugins->getFirstChildElement();node!=nullptr;node=node->getNextElement()){
+            if(!node->hasTagName("SLOT"))continue;
+            const int i=node->getIntAttribute("index",-1);
+            if(i<0 || i>=VstChain::totalSlots || seen[(size_t)i]){
+                status.setText("PRESET: slot VST3 non valido.",juce::dontSendNotification);return false;
+            }
+            seen[(size_t)i]=true;
+            auto& e=entries[(size_t)i];
+            e.path=node->getStringAttribute("file");
+            e.encoded=node->getStringAttribute("state");
+            e.enabled=node->getBoolAttribute("enabled",false);
+            if(e.path.isNotEmpty() && !juce::File(e.path).exists()){
+                status.setText("PRESET: VST3 mancante: "+e.path,juce::dontSendNotification);return false;
+            }
+        }
+        for(bool found:seen)if(!found){
+            status.setText("PRESET: elenco VST3 incompleto.",juce::dontSendNotification);return false;
+        }
+        const auto irPath=root->getStringAttribute("irPath");
+        if(irPath.isNotEmpty() && !juce::File(irPath).existsAsFile()){
+            status.setText("PRESET: cabinet IR mancante: "+irPath,juce::dontSendNotification);return false;
+        }
+        // Close any active editor before replacing/restoring its processor.
+        activePluginWindow.reset();activePluginEditorSlot=-1;
+        juce::StringArray errors;
+        const double rate=sampleRateLive.load();
+        for(int i=0;i<VstChain::totalSlots;++i){
+            const auto& entry=entries[(size_t)i];
+            const auto installed=vstChain.bundlePath(i).getFullPathName();
+            if(entry.path.isEmpty()){
+                if(i!=VstChain::sculptSlot){
+                    const juce::ScopedLock lock(deviceManager.getAudioCallbackLock());
+                    vstChain.remove(i);
+                }
+                continue;
+            }
+            if(entry.path!=installed || vstChain.get(i)==nullptr){
+                juce::String error;
+                bool loaded=false;
+                {
+                    const juce::ScopedLock lock(deviceManager.getAudioCallbackLock());
+                    loaded=vstChain.load(i,juce::File(entry.path),rate,kBlock,error);
+                }
+                if(!loaded){errors.add(juce::String(i+1)+": "+error);continue;}
+            }
+            juce::MemoryBlock state;
+            if(entry.encoded.isNotEmpty()){
+                if(!state.fromBase64Encoding(entry.encoded)){
+                    errors.add("Stato plugin danneggiato: slot "+juce::String(i+1));continue;
+                }
+                const juce::ScopedLock lock(deviceManager.getAudioCallbackLock());
+                if(auto* processor=vstChain.get(i))processor->setStateInformation(state.getData(),(int)state.getSize());
+            }
+            vstChain.enable(i,i==VstChain::sculptSlot?true:entry.enabled);
+        }
+        // Compare NAM file lists: no unnecessary model reload if current library is identical.
+        bool same=namFiles.size()==(int)captures.size();
+        if(same)for(int i=0;i<namFiles.size();++i)
+            if(namFiles.getReference(i)!=captures[(size_t)i].file){same=false;break;}
+        const auto wanted=nam->getStringAttribute("selectedPath");
+        if(!same){
+            loadModelsFromFiles(namFiles,wanted,false);
+            if(captures.size()!=static_cast<size_t>(namFiles.size()))
+                errors.add("Alcune catture NAM non sono state caricate correttamente");
+            if(wanted.isNotEmpty()){
+                const int index=requestedIndex.load();
+                if(index<0 || index>=(int)captures.size() ||
+                   captures[(size_t)index].file.getFullPathName()!=wanted)
+                    errors.add("NAM selezionato non disponibile: "+wanted);
+            }
+        }else{
+            int index=-1;
+            for(int i=0;i<(int)captures.size();++i)
+                if(captures[(size_t)i].file.getFullPathName()==wanted){index=i;break;}
+            selectNam(index);
+        }
+        if(irPath.isNotEmpty()){
+            const juce::File chosenIr(irPath);
+            if(irFile!=chosenIr || !irLoaded.load()){
+                cab.loadImpulseResponse(chosenIr,juce::dsp::Convolution::Stereo::no,
+                    juce::dsp::Convolution::Trim::yes,0,juce::dsp::Convolution::Normalise::yes);
+            }
+            irFile=chosenIr;irName=chosenIr.getFileName();irLoaded.store(true);
+        }else{
+            irLoaded.store(false);irName.clear();irFile=juce::File();
+        }
+        gateEnabled.store(root->getBoolAttribute("gate",true));
+        gateThresholdDb.store(juce::jlimit(-85.f,-15.f,(float)root->getDoubleAttribute("gateDb",-65.)));
+        masterGainDb.store(juce::jlimit(-60.f,6.f,(float)root->getDoubleAttribute("masterDb",0.)));
+        tempoBpm.store(juce::jlimit(40,250,root->getIntAttribute("bpm",120)));
+        namInputGainDb.store(juce::jlimit(-12.f,12.f,(float)root->getDoubleAttribute("namInputDb",0.)));
+        namOutputGainDb.store(juce::jlimit(-12.f,12.f,(float)root->getDoubleAttribute("namOutputDb",0.)));
+        // Tuner mute deliberately stays under the performer's control, not the preset.
+        currentPresetName=root->getStringAttribute("name");
+        if(!errors.isEmpty()){
+            status.setText("PRESET PARZIALE / "+errors.joinIntoString("; "),juce::dontSendNotification);
+            return false;
+        }
+        status.setText("PRESET CARICATO: "+currentPresetName,juce::dontSendNotification);
+        return true;
+    }
+
     void loadModels(const juce::File& folder) {
+        juce::Array<juce::File> files;
+        if(folder.existsAsFile() && folder.hasFileExtension(".nam")) files.add(folder);
+        else if(folder.isDirectory()) files=folder.findChildFiles(juce::File::findFiles,true,"*.nam");
+        std::sort(files.begin(),files.end(),[](const auto& a,const auto& b){return a.getFullPathName()<b.getFullPathName();});
+        loadModelsFromFiles(files, {}, true);
+    }
+
+    void loadModelsFromFiles(const juce::Array<juce::File>& files, const juce::String& selection,
+                             bool chooseFirst) {
+
         auto* deviceBeforeLoad = deviceManager.getCurrentAudioDevice();
         const int sr = static_cast<int>(deviceBeforeLoad ? deviceBeforeLoad->getCurrentSampleRate() : 48000);
         std::vector<Capture> loadedCaptures;
-        juce::Array<juce::File> files;
         namSelector.clear(juce::dontSendNotification);
         libraryPage=0;
-        if (folder.existsAsFile() && folder.hasFileExtension(".nam")) files.add(folder);
-        else files=folder.findChildFiles(juce::File::findFiles, true, "*.nam");
-        std::sort(files.begin(), files.end(), [](const auto& a, const auto& b) { return a.getFullPathName() < b.getFullPathName(); });
         NeuralAudio::NeuralModelLoader loader;
         loader.SetDefaultMaxAudioBufferSize(kBlock);
         loader.SetExternalSampleRate(sr);
@@ -932,7 +1426,13 @@ private:
         {
             const juce::ScopedLock lock(deviceManager.getAudioCallbackLock());
             captures = std::move(loadedCaptures);
-            requestedIndex.store(captures.empty() ? -1 : 0, std::memory_order_relaxed);
+            int selected = captures.empty() || !chooseFirst ? -1 : 0;
+            if(selection.isNotEmpty()){
+                selected=-1;
+                for(int i=0;i<(int)captures.size();++i)
+                    if(captures[(size_t)i].file.getFullPathName()==selection){selected=i;break;}
+            }
+            requestedIndex.store(selected, std::memory_order_relaxed);
             activeIndex = requestedIndex.load(std::memory_order_relaxed);
             fadingFrom = -1;
             fadeRemaining = 0;
@@ -940,7 +1440,7 @@ private:
         namSelector.addItem("BYPASS NAM / SEGNALE DI",1);
         for (int i=0;i<static_cast<int>(captures.size());++i)
             namSelector.addItem(captures[static_cast<size_t>(i)].name,i+2);
-        namSelector.setSelectedId(captures.empty()?1:2,juce::dontSendNotification);
+        namSelector.setSelectedId(requestedIndex.load()+2,juce::dontSendNotification);
         if (captures.empty()) {
             status.setText("Nessun NAM caricato. Il rig resta utilizzabile con il segnale DI e i VST3.",juce::dontSendNotification);
             current.setText("NESSUN PROFILO",juce::dontSendNotification);
@@ -960,6 +1460,7 @@ private:
                     juce::dsp::Convolution::Trim::yes, 0,
                     juce::dsp::Convolution::Normalise::yes);
                 irLoaded.store(true);
+                irFile = f;
                 irName = f.getFileName();
                 status.setText("IR caricata: "+irName+".",juce::dontSendNotification);
             }
@@ -1040,6 +1541,7 @@ private:
     std::atomic<int> requestedIndex{-1};
     std::atomic<bool> irLoaded{false};
     std::atomic<float> levelDb{-90.f}, outputDb{-90.f}, masterGainDb{0.f};
+    std::atomic<float> namInputGainDb{0.f}, namOutputGainDb{0.f};
     std::atomic<double> sampleRateLive{48000.};
     int activeIndex = -1, fadingFrom = -1, fadeRemaining = 0;
     float lowpassZ = 0.0f;
@@ -1047,15 +1549,24 @@ private:
     std::array<float, kBlock> inputScratch{}, dryInput{}, driven{}, outA{}, outB{};
     juce::AudioBuffer<float> fxBuffer{2,kBlock};
     VstChain vstChain;
+    GuitarTuner tuner;
+    std::atomic<bool> tunerMute{false};
+    std::atomic<int> tempoBpm{120};
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> tunerMuteGain;
     juce::Viewport rigViewport;
+    juce::Label quickTitle;
+    std::array<juce::Label,5> quickNames;
+    std::array<juce::TextButton,5> quickRecall,quickStore;
+    juce::String currentPresetName;
     std::unique_ptr<RigPanel> rigPanel;
     std::unique_ptr<AudioSetupOverlay> audioSetupOverlay;
     std::atomic<bool> gateEnabled{true};
-    std::atomic<float> gateThresholdDb{-55.f};
+    std::atomic<float> gateThresholdDb{-65.f};
     float gateEnvelope=0.f, gateGain=0.f;
     juce::AudioBuffer<float> cabBuffer{1,kBlock};
     juce::dsp::Convolution cab;
     juce::String irName;
+    juce::File irFile;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(GuitarRigWindow)
 };
 
@@ -1068,7 +1579,7 @@ public:
 class SculptApp final : public juce::JUCEApplication {
 public:
     const juce::String getApplicationName() override { return "Sculpt Guitar Rig"; }
-    const juce::String getApplicationVersion() override { return "0.9.0-beta-one-window"; }
+    const juce::String getApplicationVersion() override { return "1.2.0-beta-presets"; }
     bool moreThanOneInstanceAllowed() override { return false; }
     void initialise(const juce::String&) override {
         mainWindow = std::make_unique<SculptMainWindow>();
