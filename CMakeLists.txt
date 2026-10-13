@@ -4,7 +4,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(NOT APPLE)
-  message(FATAL_ERROR "Sculpt AutoTone VST3 rig is currently macOS-only.")
+  message(FATAL_ERROR "Sculpt Guitar Rig is currently macOS-only.")
 endif()
 include(FetchContent)
 set(FETCHCONTENT_QUIET OFF)
@@ -13,12 +13,12 @@ FetchContent_Declare(NeuralAudioSource GIT_REPOSITORY https://github.com/mikeoli
 FetchContent_MakeAvailable(JUCE NeuralAudioSource)
 
 juce_add_gui_app(SculptAutoTone
-    PRODUCT_NAME "Sculpt AutoTone"
+    PRODUCT_NAME "Sculpt Guitar Rig"
     COMPANY_NAME "Sculpt Audio Lab"
     BUNDLE_ID "com.sculptaudiolab.autotone.beta"
     ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/Assets/AppIcon.png"
     MICROPHONE_PERMISSION_ENABLED TRUE
-    MICROPHONE_PERMISSION_TEXT "Sculpt AutoTone needs your audio interface input to analyze and process your guitar live. No guitar audio is saved."
+    MICROPHONE_PERMISSION_TEXT "Sculpt Guitar Rig needs your audio interface input to analyze and process your guitar live. No guitar audio is saved."
 )
 
 juce_add_binary_data(SculptRigArtwork SOURCES Assets/RigArtwork.png Assets/AppIcon.png)

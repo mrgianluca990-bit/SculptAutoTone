@@ -1,0 +1,46 @@
+SCULPT GUITAR RIG — GUI ANALOGICA v1.3
+======================================
+
+OBIETTIVO
+Riprodurre lo stile della grafica approvata usando elementi JUCE reali.
+Questa versione aggiorna soltanto interfaccia, grafica e hit-target:
+processamento DSP, NAM, VST3 hosting, clock TAP e preset sono invariati
+rispetto alla v1.2 funzionante.
+
+FILE DA CARICARE SU GITHUB (SculptAutoTone)
+- Source/Main.cpp                 -> sostituire il file esistente
+- Assets/RigArtwork.png          -> aggiungere la cartella Assets, se mancante
+- CMakeLists.txt                  -> sostituire il file esistente
+
+NON SERVE MODIFICARE
+- Source/VstChain.h
+- Source/GuitarTuner.h
+- .github/workflows/build-macos.yml
+
+CONTROLLI INTERATTIVI
+- SETUP AUDIO & MIDI: apre overlay nella stessa finestra.
+- Gate: ON/OFF e soglia dB (di default -65 dB).
+- Tuner: nota e deviazione live; attivazione/MUTE.
+- 8 slot PRE e POST: menu VST3, EDIT, BYPASS, X.
+  Anche il footswitch metallico è cliccabile; clicca la miniatura del rack
+  per aprire l'editor nativo del VST3 o scegliere un plugin.
+- Sculpt Channel: Low/Mid/High/Presence/Output, Variation, EDIT.
+  Sempre fisso e attivo, prima del NAM.
+- NAM: menu catture, navigazione, Importa NAM, CAB IR, Input/Output dB.
+- Output: master, livello, TAP BPM host.
+- Preset: menu salvati in alto e 5 preset rapidi in basso.
+
+RISORSE GRAFICHE
+Assets/RigArtwork.png è un atlas PNG con sfondo trasparente contenente
+solo elementi decorativi derivati dal mockup approvato: 8 mini-display rack
++ cabinet. Le miniature non sono il rendering autentico dei VST3 caricati;
+i pulsanti e i selettori JUCE mostrano lo stato effettivo. L'editor VST3
+originale rimane l'unica finestra flottante ammessa.
+
+COMPILAZIONE
+GitHub Actions crea la app universal macOS (Intel/Apple Silicon).
+Lo script di compilazione preesistente non richiede modifiche.
+
+STATO TEST
+Controlli statici sul sorgente e integrità del pacchetto eseguiti.
+La compilazione macOS e il test con plugin reali vanno ancora eseguiti.
