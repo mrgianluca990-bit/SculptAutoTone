@@ -99,7 +99,7 @@ public:
         title.setText("SCULPT  /  AUTO TONE", juce::dontSendNotification);
         title.setFont(juce::Font(juce::FontOptions(27.f, juce::Font::bold)));
         title.setColour(juce::Label::textColourId, kText);
-        subtitle.setText("LIVE NEURAL TONE FINDER     •     BETA 0.2", juce::dontSendNotification);
+        subtitle.setText("LIVE NEURAL TONE FINDER     •     BETA 0.3", juce::dontSendNotification);
         subtitle.setFont(juce::Font(juce::FontOptions(11.f)));
         subtitle.setColour(juce::Label::textColourId, kWarm);
         status.setText("Collega la scheda audio e scegli una cartella NAM per cominciare.", juce::dontSendNotification);
@@ -140,8 +140,33 @@ public:
         countLabel.setText("0 MODELLI CARICATI",juce::dontSendNotification);
         irLabel.setText("Cabinet IR: nessuna",juce::dontSendNotification);
 
+        // TONE3000 integration: direct search via the official website in the user's
+        // browser, without scraping, API secrets, or unsupported catalog endpoints.
+        // Future in-app results/downloads require TONE3000 OAuth PKCE approval.
+        tone3000Brand.setText("POWERED BY TONE3000  /  ONLINE NAM SEARCH", juce::dontSendNotification);
+        tone3000Brand.setColour(juce::Label::textColourId, kWarm);
+        tone3000Brand.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
+        tone3000Brand.setJustificationType(juce::Justification::centredLeft);
+        addAndMakeVisible(tone3000Brand);
+
+        tone3000Query.setTextToShowWhenEmpty("Cerca: Plexi, JCM800, Fender...", kMuted);
+        tone3000Query.setFont(juce::Font(juce::FontOptions(13.f)));
+        tone3000Query.setColour(juce::TextEditor::backgroundColourId, kPanelAlt);
+        tone3000Query.setColour(juce::TextEditor::textColourId, kText);
+        tone3000Query.setColour(juce::TextEditor::outlineColourId, kMuted.withAlpha(0.25f));
+        tone3000Query.setColour(juce::TextEditor::focusedOutlineColourId, kAccent);
+        tone3000Query.setColour(juce::CaretComponent::caretColourId, kWarm);
+        tone3000Query.setReturnKeyStartsNewLine(false);
+        tone3000Query.onReturnKey = [this] { openTone3000Search(); };
+        tone3000Query.setTooltip("Cerca sul catalogo ufficiale TONE3000; i risultati si aprono nel browser.");
+        addAndMakeVisible(tone3000Query);
+        tone3000Search.setButtonText("CERCA ONLINE  ↗");
+        tone3000Search.setTooltip("Mostra i risultati su tone3000.com. Nessuna chiave API richiesta.");
+        tone3000Search.onClick = [this] { openTone3000Search(); };
+        tone3000Search.setColour(juce::TextButton::textColourOffId, kText);
+        addAndMakeVisible(tone3000Search);
         audioButton.setButtonText("CONFIGURA AUDIO");
-        folderButton.setButtonText("CARICA CARTELLA NAM");
+        folderButton.setButtonText("IMPORTA NAM SCARICATI");
         irButton.setButtonText("CARICA CABINET IR");
         lockButton.setButtonText("LOCK");
         autoButton.setButtonText("AUTO");
@@ -177,6 +202,7 @@ public:
         }
         audioButton.onClick = [this] { showAudioSettings(); };
         folderButton.onClick = [this] { chooseNAMFolder(); };
+        folderButton.setTooltip("Scegli una cartella con file .nam gia estratti, di solito in Download.");
         irButton.onClick = [this] { chooseIR(); };
         lockButton.onClick = [this] { locked.store(!locked.load()); refreshControls(); };
         autoButton.onClick = [this] {
@@ -304,8 +330,12 @@ public:
         // Branded header: analogue red accent and restrained studio hardware styling.
         g.setColour(kAccent);
         g.fillRoundedRectangle(juce::Rectangle<float>(24.f, 28.f, 5.f, 42.f), 2.f);
+        g.setColour(kPanel);
+        g.fillRoundedRectangle(juce::Rectangle<float>(707.f, 11.f, 468.f, 78.f), 10.f);
+        g.setColour(kAccent.withAlpha(0.45f));
+        g.drawRoundedRectangle(juce::Rectangle<float>(707.f, 11.f, 468.f, 78.f), 10.f, 1.f);
         g.setColour(kMuted.withAlpha(0.25f));
-        g.drawLine(24.f, 94.f, 1176.f, 94.f, 1.f);
+        g.drawLine(24.f, 99.f, 1176.f, 99.f, 1.f);
         auto panel = [&](float x, float y, float w, float h) {
             auto r=juce::Rectangle<float>(x,y,w,h);
             g.setColour(kPanel);
@@ -399,8 +429,11 @@ public:
     }
 
     void resized() override {
-        title.setBounds(43,22,625,40);
-        subtitle.setBounds(44,65,670,21);
+        title.setBounds(43,22,635,40);
+        subtitle.setBounds(44,65,655,21);
+        tone3000Brand.setBounds(723,14,431,23);
+        tone3000Query.setBounds(722,43,285,33);
+        tone3000Search.setBounds(1016,43,145,33);
         audioButton.setBounds(43,172,211,43);
         deviceLabel.setBounds(43,221,211,23);
         sampleLabel.setBounds(43,246,211,20);
@@ -442,8 +475,26 @@ private:
         status.setText("Se cambi sample rate, ricarica la cartella NAM per riallineare i modelli.",juce::dontSendNotification);
     }
 
+    // User-initiated online search; authoritative TONE3000 result pages handle login,
+    // attribution, creator licenses and downloads. No third-party catalog is scraped.
+    void openTone3000Search() {
+        const auto query = tone3000Query.getText().trim();
+        auto url = juce::URL("https://www.tone3000.com/search");
+        if (query.isNotEmpty())
+            url = url.withParameter("q", query);
+        if (url.launchInDefaultBrowser())
+            status.setText("TONE3000 aperto nel browser. Scarica il NAM, estrailo e premi IMPORTA NAM SCARICATI.",
+                           juce::dontSendNotification);
+        else
+            status.setText("Impossibile aprire il browser. Visita www.tone3000.com/search.",
+                           juce::dontSendNotification);
+    }
+
     void chooseNAMFolder() {
-        fileChooser = std::make_unique<juce::FileChooser>("Seleziona una cartella di modelli .nam", juce::File::getSpecialLocation(juce::File::userDocumentsDirectory));
+        auto downloads = juce::File::getSpecialLocation(juce::File::userHomeDirectory).getChildFile("Downloads");
+        if (! downloads.isDirectory())
+            downloads = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+        fileChooser = std::make_unique<juce::FileChooser>("Scegli una cartella con profili .nam estratti", downloads);
         fileChooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
                                 [this](const juce::FileChooser& chooser) {
             const auto folder = chooser.getResult();
@@ -581,7 +632,9 @@ private:
     }
 
     SculptLook sculptLook;
-    juce::Label title, subtitle, status, current, level, info;
+    juce::Label title, subtitle, status, current, level, info, tone3000Brand;
+    juce::TextEditor tone3000Query;
+    juce::TextButton tone3000Search;
     juce::Label deviceLabel, sampleLabel, categoryLabel, reasonLabel, signalLabel, countLabel, irLabel, modeLabel;
     std::array<juce::Label,5> suggestionNames;
     std::array<juce::TextButton,5> suggestionButtons;
@@ -615,7 +668,7 @@ public:
 class SculptApp final : public juce::JUCEApplication {
 public:
     const juce::String getApplicationName() override { return "Sculpt AutoTone"; }
-    const juce::String getApplicationVersion() override { return "0.2.0-beta-ui"; }
+    const juce::String getApplicationVersion() override { return "0.3.0-beta-tone3000-search"; }
     bool moreThanOneInstanceAllowed() override { return false; }
     void initialise(const juce::String&) override {
         mainWindow = std::make_unique<SculptMainWindow>();
