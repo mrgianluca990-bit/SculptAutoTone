@@ -2,6 +2,7 @@
 #include <juce_dsp/juce_dsp.h>
 #include <NeuralAudio/NeuralModel.h>
 #include "ToneBrain.h"
+#include "VstChain.h"
 
 #include <array>
 #include <atomic>
@@ -99,7 +100,7 @@ public:
         title.setText("SCULPT  /  AUTO TONE", juce::dontSendNotification);
         title.setFont(juce::Font(juce::FontOptions(27.f, juce::Font::bold)));
         title.setColour(juce::Label::textColourId, kText);
-        subtitle.setText("LIVE NEURAL TONE FINDER     •     BETA 0.4", juce::dontSendNotification);
+        subtitle.setText("LIVE NEURAL TONE FINDER     •     BETA 0.6 / VST3 RIG", juce::dontSendNotification);
         subtitle.setFont(juce::Font(juce::FontOptions(11.f)));
         subtitle.setColour(juce::Label::textColourId, kWarm);
         status.setText("Collega la scheda audio e scegli una cartella NAM per cominciare.", juce::dontSendNotification);
@@ -190,6 +191,11 @@ public:
         tone3000Search.onClick = [this] { openTone3000Search(); };
         tone3000Search.setColour(juce::TextButton::textColourOffId, kText);
         addAndMakeVisible(tone3000Search);
+        rigButton.setButtonText("APRI RIG  /  VST3 PRE · SCULPT CH · POST");
+        rigButton.setTooltip("Nove insert VST3: quattro pre NAM, Sculpt Channel dopo IR, quattro post IR.");
+        rigButton.setColour(juce::TextButton::textColourOffId, kText);
+        rigButton.onClick = [this] { showRigPanel(); };
+        addAndMakeVisible(rigButton);
         audioButton.setButtonText("CONFIGURA AUDIO");
         folderButton.setButtonText("IMPORTA NAM SCARICATI");
         irButton.setButtonText("CARICA CABINET IR");
@@ -246,7 +252,9 @@ public:
     }
 
     ~AutoToneWindow() override {
-        stopTimer(); shutdownAudio();
+        stopTimer();
+        activePluginWindow.reset();
+        shutdownAudio();
         setLookAndFeel(nullptr);
     }
 
@@ -262,6 +270,9 @@ public:
         masterGain.setCurrentAndTargetValue(initialDb <= -60.f ? 0.f : gainFromDb(initialDb));
         cab.prepare({ sampleRate, static_cast<juce::uint32>(kBlock), 1 });
         cab.reset();
+        vstChain.prepare(sampleRate, kBlock);
+        gateEnvelope = 0.f;
+        gateGain = 0.f;
         activeIndex = captures.empty() ? -1 : 0;
         fadingFrom = -1;
         fadeRemaining = 0;
@@ -283,7 +294,30 @@ public:
         while (offset < count) {
             const int n = std::min(kBlock, count - offset);
             const float* input = audio->getReadPointer(0, start + offset);
-            std::copy_n(input, n, inputScratch.begin());
+            // Preserve DI for AutoTone analysis; effects never affect tone selection.
+            std::copy_n(input, n, dryInput.begin());
+            const float threshold = gainFromDb(gateThresholdDb.load(std::memory_order_relaxed));
+            const bool doGate = gateEnabled.load(std::memory_order_relaxed);
+            const float attackCoeff = 0.08f;
+            const float releaseCoeff = 0.0009f;
+            for (int j=0;j<n;++j) {
+                const float x=dryInput[static_cast<size_t>(j)];
+                const float magnitude=std::abs(x);
+                gateEnvelope += (magnitude > gateEnvelope ? attackCoeff : releaseCoeff) * (magnitude-gateEnvelope);
+                const float goal = (!doGate || gateEnvelope >= threshold) ? 1.f : 0.f;
+                gateGain += (goal-gateGain) * 0.008f;
+                const float y = x * gateGain;
+                fxBuffer.setSample(0,j,y);
+                fxBuffer.setSample(1,j,y);
+            }
+            // PRE: four independent VST3 inserts. The NAM input is collapsed to mono
+            // after PRE because Neural Amp Modeler expects a single DI channel.
+            juce::AudioBuffer<float> vstView(fxBuffer.getArrayOfWritePointers(), 2, n);
+            for (int si=0;si<4;++si) vstChain.process(si, vstView);
+            const auto* preL=fxBuffer.getReadPointer(0);
+            const auto* preR=fxBuffer.getReadPointer(1);
+            for (int j=0;j<n;++j)
+                inputScratch[static_cast<size_t>(j)] = 0.5f*(preL[j]+preR[j]);
             const int desired = requestedIndex.load();
             if (desired >= 0 && desired < static_cast<int>(captures.size()) && desired != activeIndex && fadeRemaining <= 0) {
                 fadingFrom = activeIndex;
@@ -330,32 +364,42 @@ public:
                     outA[static_cast<size_t>(i)] = lowpassZ;
                 }
             }
-            // Final master gain: post-NAM, post-IR. The existing safety clamp stays in place.
+            // Dedicated SCULPT CHANNEL after cabinet IR, then four independent POST VST3.
+            fxBuffer.copyFrom(0, 0, outA.data(), n);
+            fxBuffer.copyFrom(1, 0, outA.data(), n);
+            vstChain.process(4, vstView);
+            for (int si=5;si<9;++si) vstChain.process(si, vstView);
+            // Final master gain: after all nine VST3 inserts; preserve stereo post effects.
             const float masterDb = masterGainDb.load(std::memory_order_relaxed);
             masterGain.setTargetValue(masterDb <= -60.f ? 0.f : gainFromDb(masterDb));
             auto* left = audio->getWritePointer(0, start + offset);
-            for (int i=0;i<n;++i)
-                left[i] = juce::jlimit(-0.85f, 0.85f,
-                    outA[static_cast<size_t>(i)] * masterGain.getNextValue());
-            for (int ch=1;ch<numChannels;++ch) audio->copyFrom(ch,start+offset,*audio,0,start+offset,n);
+            auto* right = numChannels > 1 ? audio->getWritePointer(1, start + offset) : nullptr;
+            const auto* processedL = fxBuffer.getReadPointer(0);
+            const auto* processedR = fxBuffer.getReadPointer(1);
+            for (int i=0;i<n;++i) {
+                const float gain = masterGain.getNextValue();
+                left[i] = juce::jlimit(-0.85f, 0.85f, processedL[i] * gain);
+                if (right != nullptr) right[i] = juce::jlimit(-0.85f,0.85f,processedR[i]*gain);
+            }
+            for (int ch=2;ch<numChannels;++ch) audio->copyFrom(ch,start+offset,*audio,0,start+offset,n);
             if (automatic.load()) {
                 for (size_t j = 0; j < currentFeedback.size(); ++j)
                     currentFeedback[j] = feedback[j].load(std::memory_order_relaxed);
-                auto result = brain.update(inputScratch.data(), n, characters, currentFeedback,
+                auto result = brain.update(dryInput.data(), n, characters, currentFeedback,
                                           activeIndex, locked.load());
                 levelDb.store(result.level);
                 analysisTarget.store(result.targetDrive);
                 if (result.index >= 0) requestedIndex.store(result.index);
             } else {
                 double sum=0;
-                for (int i=0;i<n;++i) sum += inputScratch[static_cast<size_t>(i)]*inputScratch[static_cast<size_t>(i)];
+                for (int i=0;i<n;++i) sum += dryInput[static_cast<size_t>(i)]*dryInput[static_cast<size_t>(i)];
                 levelDb.store(20.f*std::log10(std::max(1.e-8, std::sqrt(sum/n))));
             }
             offset += n;
         }
     }
 
-    void releaseResources() override { cab.reset(); }
+    void releaseResources() override { vstChain.release(); cab.reset(); }
 
     void paint(juce::Graphics& g) override {
         g.setGradientFill(juce::ColourGradient(juce::Colour(0xff202023), 0.f, 0.f, kBg, 0.f, 740.f, false));
@@ -460,7 +504,7 @@ public:
         g.drawLine(24.f,674.f,1175.f,674.f,1.f);
         g.setColour(kMuted);
         g.setFont(juce::Font(juce::FontOptions(10.5f)));
-        g.drawText("LOCAL NAM ENGINE   /   NESSUNA REGISTRAZIONE SU DISCO",916,687,260,24,juce::Justification::centredRight,true);
+        g.drawText("VST3 HOST  /  NAM  /  SCULPT CHANNEL",903,687,275,24,juce::Justification::centredRight,true);
     }
 
     void resized() override {
@@ -485,7 +529,8 @@ public:
         categoryLabel.setBounds(327,280,484,32);
         irLabel.setBounds(327,454,484,28);
         reasonLabel.setBounds(329,532,480,32);
-        modeLabel.setBounds(329,614,480,27);
+        modeLabel.setBounds(329,614,190,27);
+        rigButton.setBounds(532,612,286,35);
         for (int i=0;i<5;++i) {
             const int y=199+i*80;
             suggestionNames[static_cast<size_t>(i)].setBounds(927,y,140,42);
@@ -498,6 +543,200 @@ public:
     }
 
 private:
+    class HostedEditorWindow final : public juce::DocumentWindow {
+    public:
+        explicit HostedEditorWindow(juce::AudioPluginInstance& processor)
+            : juce::DocumentWindow(processor.getName(), kBg, juce::DocumentWindow::closeButton) {
+            juce::AudioProcessorEditor* editor = processor.createEditorIfNeeded();
+            if (editor == nullptr) editor = new juce::GenericAudioProcessorEditor(processor);
+            setContentOwned(editor, true);
+            setUsingNativeTitleBar(true);
+            setResizable(false,false);
+            centreWithSize(juce::jmax(450,editor->getWidth()), juce::jmax(280,editor->getHeight()));
+        }
+        void closeButtonPressed() override { setVisible(false); }
+    };
+
+    class RigPanel final : public juce::Component, private juce::Timer {
+    public:
+        explicit RigPanel(AutoToneWindow& parent) : owner(parent) {
+            setOpaque(true);
+            gateLabel.setText("INPUT NOISE GATE  /  FISSO, PRIMA DEI VST3",juce::dontSendNotification);
+            gateLabel.setColour(juce::Label::textColourId,kWarm);
+            gateLabel.setFont(juce::Font(juce::FontOptions(14.f,juce::Font::bold)));
+            addAndMakeVisible(gateLabel);
+            gateBypass.setButtonText("GATE ON");
+            gateBypass.onClick=[this]{owner.gateEnabled.store(!owner.gateEnabled.load());updateLabels();};
+            addAndMakeVisible(gateBypass);
+            threshold.setSliderStyle(juce::Slider::LinearHorizontal);
+            threshold.setTextBoxStyle(juce::Slider::TextBoxRight,false,75,23);
+            threshold.setRange(-85.,-15.,1.);
+            threshold.setValue(owner.gateThresholdDb.load(),juce::dontSendNotification);
+            threshold.setTextValueSuffix(" dB");
+            threshold.onValueChange=[this]{owner.gateThresholdDb.store(static_cast<float>(threshold.getValue()));};
+            addAndMakeVisible(threshold);
+            caption.setText("PRE 1–4  →  NAM  →  IR  →  SCULPT CHANNEL  →  POST 1–4  →  MASTER",juce::dontSendNotification);
+            caption.setColour(juce::Label::textColourId,kMuted);
+            caption.setJustificationType(juce::Justification::centred);
+            caption.setFont(juce::Font(juce::FontOptions(13.f,juce::Font::bold)));
+            addAndMakeVisible(caption);
+            for (int i=0;i<9;++i) {
+                auto& label=labels[static_cast<size_t>(i)];
+                label.setColour(juce::Label::textColourId,kText);
+                label.setFont(juce::Font(juce::FontOptions(12.7f,juce::Font::bold)));
+                label.setMinimumHorizontalScale(0.7f);
+                addAndMakeVisible(label);
+                auto& load=loads[static_cast<size_t>(i)];
+                load.setButtonText(i==4 ? "SCULPT CH" : "CARICA VST3");
+                load.onClick=[this,i]{owner.showPluginMenu(i);};
+                addAndMakeVisible(load);
+                auto& edit=editors[static_cast<size_t>(i)];
+                edit.setButtonText("EDIT");
+                edit.onClick=[this,i]{owner.openPluginEditor(i);};
+                addAndMakeVisible(edit);
+                auto& bypass=bypasses[static_cast<size_t>(i)];
+                bypass.onClick=[this,i]{owner.vstChain.enable(i,!owner.vstChain.enabled(i));updateLabels();};
+                addAndMakeVisible(bypass);
+                auto& remove=removes[static_cast<size_t>(i)];
+                remove.setButtonText("X");
+                remove.onClick=[this,i]{owner.removeVstSlot(i);updateLabels();};
+                addAndMakeVisible(remove);
+            }
+            hint.setText("Installa i VST3 sul Mac. CARICA apre la lista locale; EDIT apre la GUI originale del plugin. Le modifiche agli slot interrompono brevemente l'audio.",juce::dontSendNotification);
+            hint.setColour(juce::Label::textColourId,kMuted);
+            hint.setFont(juce::Font(juce::FontOptions(11.5f)));
+            hint.setJustificationType(juce::Justification::centred);
+            addAndMakeVisible(hint);
+            setSize(1100,750);
+            startTimerHz(2);
+            updateLabels();
+        }
+        ~RigPanel() override { stopTimer(); }
+        void paint(juce::Graphics& g) override {
+            g.fillAll(kBg);
+            auto drawPanel=[&](int x,int y,int w,int h,const juce::String& text){
+                g.setColour(kPanel); g.fillRoundedRectangle(juce::Rectangle<float>(x,y,w,h),11.f);
+                g.setColour(kAccent.withAlpha(.42f));g.drawRoundedRectangle(juce::Rectangle<float>(x,y,w,h),11.f,1.f);
+                g.setColour(kWarm);g.setFont(juce::Font(juce::FontOptions(14.f,juce::Font::bold)));
+                g.drawText(text,x+18,y+13,w-36,22,juce::Justification::centredLeft);
+            };
+            drawPanel(16,16,1068,92,"01 / INPUT");
+            drawPanel(16,148,520,403,"02 / PRE NAM   ·   4 VST3");
+            drawPanel(549,148,535,403,"04 / POST NAM / POST SCULPT CH   ·   4 VST3");
+            drawPanel(16,569,1068,106,"03 / SCULPT CHANNEL   ·   DOPO NAM + IR");
+            g.setColour(kMuted);g.setFont(juce::Font(juce::FontOptions(12.f)));
+            g.drawText("NAM + CABINET IR sono gestiti dalla finestra principale.",20,111,1060,28,juce::Justification::centred);
+        }
+        void resized() override {
+            gateLabel.setBounds(40,54,450,26);
+            gateBypass.setBounds(505,54,114,28);
+            threshold.setBounds(638,51,415,34);
+            caption.setBounds(20,112,1060,30);
+            for(int i=0;i<9;++i){
+                int x= i<4 ? 32 : (i==4 ? 32 : 565);
+                int w= i==4 ? 1028 : (i<4 ? 490 : 503);
+                int y= i<4 ? 200+i*86 : (i==4 ? 607 : 200+(i-5)*86);
+                labels[static_cast<size_t>(i)].setBounds(x+8,y,w/2-8,31);
+                const int right=x+w;
+                loads[static_cast<size_t>(i)].setBounds(right-298,y,111,31);
+                editors[static_cast<size_t>(i)].setBounds(right-181,y,55,31);
+                bypasses[static_cast<size_t>(i)].setBounds(right-121,y,82,31);
+                removes[static_cast<size_t>(i)].setBounds(right-34,y,32,31);
+            }
+            hint.setBounds(24,689,1050,35);
+        }
+    private:
+        void timerCallback() override {updateLabels();}
+        void updateLabels(){
+            gateBypass.setButtonText(owner.gateEnabled.load()?"GATE ON":"GATE OFF");
+            for(int i=0;i<9;++i){
+                const auto name=owner.vstChain.name(i);
+                const juce::String prefix= i<4 ? "PRE "+juce::String(i+1) : (i==4 ? "SCULPT CH" : "POST "+juce::String(i-4));
+                auto text=prefix+"  /  "+(name.isNotEmpty()?name:juce::String("VUOTO"));
+                labels[static_cast<size_t>(i)].setText(text,juce::dontSendNotification);
+                editors[static_cast<size_t>(i)].setEnabled(name.isNotEmpty());
+                bypasses[static_cast<size_t>(i)].setEnabled(name.isNotEmpty());
+                removes[static_cast<size_t>(i)].setEnabled(name.isNotEmpty());
+                bypasses[static_cast<size_t>(i)].setButtonText(owner.vstChain.enabled(i)?"ON":"BYPASS");
+            }
+        }
+        AutoToneWindow& owner;
+        juce::Label gateLabel,caption,hint;
+        juce::TextButton gateBypass;
+        juce::Slider threshold;
+        std::array<juce::Label,9> labels;
+        std::array<juce::TextButton,9> loads,editors,bypasses,removes;
+    };
+
+    void showRigPanel() {
+        juce::DialogWindow::LaunchOptions opt;
+        opt.content.setOwned(new RigPanel(*this));
+        opt.dialogTitle = "SCULPT AUTOTONE  /  VST3 FX RIG";
+        opt.dialogBackgroundColour = kBg;
+        opt.useNativeTitleBar = true;
+        opt.escapeKeyTriggersCloseButton = true;
+        opt.resizable = false;
+        opt.launchAsync();
+    }
+
+    void showPluginMenu(int slot) {
+        juce::PopupMenu menu;
+        const auto paths=VstChain::installedVst3();
+        for(int i=0;i<paths.size();++i) {
+            const auto& file=paths.getReference(i);
+            if(slot==VstChain::sculptSlot && !file.getFileNameWithoutExtension().toLowerCase().contains("sculpt")) continue;
+            menu.addItem(i+1,file.getFileNameWithoutExtension());
+        }
+        if (paths.isEmpty()) menu.addItem(99998,"Nessun plugin VST3 trovato",false);
+        menu.addSeparator();
+        menu.addItem(99999,"SCEGLI UN FILE .VST3... ");
+        menu.showMenuAsync(juce::PopupMenu::Options(),
+            [safe=juce::Component::SafePointer<AutoToneWindow>(this),slot,paths](int id) {
+                if (safe==nullptr || id==0) return;
+                if(id==99999) safe->browsePluginBundle(slot);
+                else if(id>=1 && id<=paths.size()) safe->loadPluginSlot(slot,paths.getReference(id-1));
+            });
+    }
+
+    void browsePluginBundle(int slot) {
+        auto home=juce::File("/Library/Audio/Plug-Ins/VST3");
+        if (!home.isDirectory()) home=juce::File::getSpecialLocation(juce::File::userHomeDirectory);
+        vstChooser=std::make_unique<juce::FileChooser>("Scegli plugin VST3",home,"*.vst3");
+        vstChooser->launchAsync(juce::FileBrowserComponent::openMode |
+             juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::canSelectDirectories,
+             [safe=juce::Component::SafePointer<AutoToneWindow>(this),slot](const juce::FileChooser& chooser){
+                 if(safe!=nullptr && chooser.getResult().exists()) safe->loadPluginSlot(slot,chooser.getResult());
+             });
+    }
+
+    void loadPluginSlot(int slot, const juce::File& bundle) {
+        if(activePluginEditorSlot==slot){activePluginWindow.reset();activePluginEditorSlot=-1;}
+        auto* device=deviceManager.getCurrentAudioDevice();
+        const double sr=device?device->getCurrentSampleRate():sampleRateLive.load();
+        shutdownAudio(); // Plugin binaries must never be swapped during audio callbacks.
+        juce::String error;
+        const bool loaded=vstChain.load(slot,bundle,sr,kBlock,error);
+        setAudioChannels(1,2);
+        if(loaded) status.setText("VST3 caricato: "+vstChain.name(slot),juce::dontSendNotification);
+        else status.setText("VST3: "+error,juce::dontSendNotification);
+    }
+    void removeVstSlot(int slot) {
+        if(activePluginEditorSlot==slot){activePluginWindow.reset();activePluginEditorSlot=-1;}
+        shutdownAudio();
+        vstChain.remove(slot);
+        setAudioChannels(1,2);
+        status.setText("Slot VST3 svuotato.",juce::dontSendNotification);
+    }
+    void openPluginEditor(int slot) {
+        auto* plugin=vstChain.get(slot);
+        if(plugin==nullptr) return;
+        activePluginWindow.reset();
+        activePluginWindow=std::make_unique<HostedEditorWindow>(*plugin);
+        activePluginEditorSlot=slot;
+        activePluginWindow->setVisible(true);
+        activePluginWindow->toFront(true);
+    }
+
     void showAudioSettings() {
         juce::DialogWindow::LaunchOptions opt;
         auto* selector = new juce::AudioDeviceSelectorComponent(deviceManager, 1, 2, 1, 2, false, false, true, false);
@@ -672,13 +911,15 @@ private:
     juce::Label title, subtitle, status, current, level, info, tone3000Brand, masterLabel;
     juce::Slider masterSlider;
     juce::TextEditor tone3000Query;
-    juce::TextButton tone3000Search;
+    juce::TextButton tone3000Search, rigButton;
     juce::Label deviceLabel, sampleLabel, categoryLabel, reasonLabel, signalLabel, countLabel, irLabel, modeLabel;
     std::array<juce::Label,5> suggestionNames;
     std::array<juce::TextButton,5> suggestionButtons;
     std::array<int,5> suggestedIndexes{{-1,-1,-1,-1,-1}};
     juce::TextButton audioButton, folderButton, irButton, lockButton, autoButton, likeButton, skipButton;
-    std::unique_ptr<juce::FileChooser> fileChooser, irChooser;
+    std::unique_ptr<juce::FileChooser> fileChooser, irChooser, vstChooser;
+    std::unique_ptr<HostedEditorWindow> activePluginWindow;
+    int activePluginEditorSlot=-1;
     std::vector<Capture> captures;
     std::vector<float> characters;
     std::vector<int> currentFeedback; // allocated while audio is stopped; refreshed from atomics in callback
@@ -691,7 +932,12 @@ private:
     int activeIndex = -1, fadingFrom = -1, fadeRemaining = 0;
     float lowpassZ = 0.0f;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> masterGain;
-    std::array<float, kBlock> inputScratch{}, driven{}, outA{}, outB{};
+    std::array<float, kBlock> inputScratch{}, dryInput{}, driven{}, outA{}, outB{};
+    juce::AudioBuffer<float> fxBuffer{2,kBlock};
+    VstChain vstChain;
+    std::atomic<bool> gateEnabled{true};
+    std::atomic<float> gateThresholdDb{-55.f};
+    float gateEnvelope=0.f, gateGain=0.f;
     juce::AudioBuffer<float> cabBuffer{1,kBlock};
     juce::dsp::Convolution cab;
     juce::String irName;
@@ -707,7 +953,7 @@ public:
 class SculptApp final : public juce::JUCEApplication {
 public:
     const juce::String getApplicationName() override { return "Sculpt AutoTone"; }
-    const juce::String getApplicationVersion() override { return "0.4.0-beta-master-output"; }
+    const juce::String getApplicationVersion() override { return "0.6.0-beta-vst3-rig"; }
     bool moreThanOneInstanceAllowed() override { return false; }
     void initialise(const juce::String&) override {
         mainWindow = std::make_unique<SculptMainWindow>();
