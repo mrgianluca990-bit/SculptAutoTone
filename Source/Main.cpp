@@ -62,7 +62,7 @@ public:
         title.setText("SCULPT  /  GUITAR RIG", juce::dontSendNotification);
         title.setFont(juce::Font(juce::FontOptions(27.f, juce::Font::bold)));
         title.setColour(juce::Label::textColourId, kText);
-        subtitle.setText("NAM  /  VST3  /  CAB IR  /  SCULPT CH     •     BETA 0.8", juce::dontSendNotification);
+        subtitle.setText("NAM  /  VST3  /  CAB IR  /  SCULPT CH     •     BETA 0.8.1", juce::dontSendNotification);
         subtitle.setFont(juce::Font(juce::FontOptions(11.f)));
         subtitle.setColour(juce::Label::textColourId, kWarm);
         status.setText("Rig manuale: scegli i tuoi NAM e i tuoi VST3. Host VST3 corretto e impostazioni audio preservate.", juce::dontSendNotification);
@@ -351,8 +351,9 @@ public:
                 if (right != nullptr) right[i] = r;
                 outEnergy += 0.5 * (double(l)*double(l) + double(r)*double(r));
             }
-            outputDb.store(static_cast<float>(20.0*std::log10(
-                std::max(1.e-8, std::sqrt(outEnergy / std::max(1,n)))))), std::memory_order_relaxed);
+            const double outRms = std::sqrt(outEnergy / std::max(1, n));
+            outputDb.store(static_cast<float>(20.0 * std::log10(std::max(1.e-8, outRms))),
+                           std::memory_order_relaxed);
             for (int ch=2;ch<numChannels;++ch) audio->copyFrom(ch,start+offset,*audio,0,start+offset,n);
             // Level meter only: no dynamics-to-tone inference and no automatic switching.
             double energy=0.0;
@@ -1024,7 +1025,7 @@ public:
 class SculptApp final : public juce::JUCEApplication {
 public:
     const juce::String getApplicationName() override { return "Sculpt Guitar Rig"; }
-    const juce::String getApplicationVersion() override { return "0.8.0-beta-manual-rig-vst3-fixes"; }
+    const juce::String getApplicationVersion() override { return "0.8.1-beta-compile-fix"; }
     bool moreThanOneInstanceAllowed() override { return false; }
     void initialise(const juce::String&) override {
         mainWindow = std::make_unique<SculptMainWindow>();
