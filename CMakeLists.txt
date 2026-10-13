@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(SculptAutoTone VERSION 1.3.0 LANGUAGES C CXX)
+project(SculptAutoTone VERSION 1.3.1 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -16,11 +16,12 @@ juce_add_gui_app(SculptAutoTone
     PRODUCT_NAME "Sculpt AutoTone"
     COMPANY_NAME "Sculpt Audio Lab"
     BUNDLE_ID "com.sculptaudiolab.autotone.beta"
+    ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/Assets/AppIcon.png"
     MICROPHONE_PERMISSION_ENABLED TRUE
     MICROPHONE_PERMISSION_TEXT "Sculpt AutoTone needs your audio interface input to analyze and process your guitar live. No guitar audio is saved."
 )
 
-juce_add_binary_data(SculptRigArtwork SOURCES Assets/RigArtwork.png)
+juce_add_binary_data(SculptRigArtwork SOURCES Assets/RigArtwork.png Assets/AppIcon.png)
 
 target_sources(SculptAutoTone PRIVATE Source/Main.cpp Source/VstChain.h Source/GuitarTuner.h)
 target_include_directories(SculptAutoTone PRIVATE ${neuralaudiosource_SOURCE_DIR})
