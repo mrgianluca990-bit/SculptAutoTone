@@ -1,7 +1,6 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_dsp/juce_dsp.h>
 #include <NeuralAudio/NeuralModel.h>
-#include "ToneBrain.h"
 #include "VstChain.h"
 
 #include <array>
@@ -28,14 +27,12 @@ public:
                               bool hovered, bool down) override {
         const auto r = b.getLocalBounds().toFloat().reduced(1.0f);
         const bool active = b.getToggleState();
-        const bool primary = b.getComponentID() == "auto" || b.getComponentID() == "lock";
-        auto fill = active ? (b.getComponentID() == "lock" ? kWarm.darker(0.68f) : kGreen.darker(0.75f)) : kPanelAlt;
-        if (primary && !active) fill = juce::Colour(0xff333339);
+        auto fill = active ? juce::Colour(0xff34483e) : kPanelAlt;
         if (hovered) fill = fill.brighter(0.10f);
         if (down) fill = fill.brighter(0.15f);
         g.setColour(fill);
         g.fillRoundedRectangle(r, 8.0f);
-        g.setColour(active ? (b.getComponentID() == "lock" ? kWarm : kGreen).withAlpha(0.68f) : juce::Colours::white.withAlpha(0.09f));
+        g.setColour(active ? kGreen.withAlpha(0.68f) : juce::Colours::white.withAlpha(0.09f));
         g.drawRoundedRectangle(r, 8.0f, 1.0f);
     }
     void drawButtonText(juce::Graphics& g, juce::TextButton& b, bool, bool) override {
@@ -50,60 +47,25 @@ struct Capture {
     juce::String name;
     juce::File file;
     std::unique_ptr<NeuralAudio::NeuralModel> model;
-    float character = 0.5f;
     float recommendedInput = 0.0f;
     float recommendedOutput = 0.0f;
 };
 
-// Character measurement uses generated sine probes in RAM, not a recorded guitar.
-// The result is an approximate distortion score, not a faithful musical description.
-float measureCharacter(NeuralAudio::NeuralModel& model, double sampleRate) {
-    constexpr int length = 8192, chunkSize = 512;
-    std::array<float, length> x{}, y{};
-    auto test = [&](float amplitude) {
-        const double omega = 2.0 * juce::MathConstants<double>::pi * 220.0 / sampleRate;
-        for (int i = 0; i < length; ++i)
-            x[static_cast<size_t>(i)] = amplitude * std::sin(omega * i);
-        for (int i = 0; i < length; i += chunkSize)
-            model.Process(x.data() + i, y.data() + i, chunkSize);
-        // Fundamental projection plus residual. Guard against silence/gated test tones.
-        double s = 0, c = 0, mean = 0, total = 0;
-        constexpr int start = 4096;
-        for (int i = start; i < length; ++i) {
-            const double v = y[static_cast<size_t>(i)];
-            s += v * std::sin(omega * i);
-            c += v * std::cos(omega * i);
-            mean += v;
-        }
-        const double n = length - start;
-        s *= 2.0 / n; c *= 2.0 / n; mean /= n;
-        for (int i = start; i < length; ++i) {
-            const double predicted = mean + s * std::sin(omega * i) + c * std::cos(omega * i);
-            const double d = y[static_cast<size_t>(i)] - predicted;
-            total += d * d;
-        }
-        const double fund = 0.5 * (s*s + c*c) * n;
-        return fund < 1e-10 ? 0.0 : std::sqrt(total / (fund + total + 1e-12));
-    };
-    const double score = std::max(test(0.045f), test(0.22f));
-    return static_cast<float>(std::clamp((score - 0.018) / 0.43, 0.0, 1.0));
-}
-
 float gainFromDb(float db) { return std::pow(10.0f, db / 20.0f); }
 }
 
-class AutoToneWindow final : public juce::AudioAppComponent, private juce::Timer {
+class GuitarRigWindow final : public juce::AudioAppComponent, private juce::Timer {
 public:
-    AutoToneWindow() {
+    GuitarRigWindow() {
         setOpaque(true);
         setLookAndFeel(&sculptLook);
-        title.setText("SCULPT  /  AUTO TONE", juce::dontSendNotification);
+        title.setText("SCULPT  /  GUITAR RIG", juce::dontSendNotification);
         title.setFont(juce::Font(juce::FontOptions(27.f, juce::Font::bold)));
         title.setColour(juce::Label::textColourId, kText);
-        subtitle.setText("LIVE NEURAL TONE FINDER     •     BETA 0.6 / VST3 RIG", juce::dontSendNotification);
+        subtitle.setText("NAM  /  VST3  /  CAB IR  /  SCULPT CH     •     BETA 0.7", juce::dontSendNotification);
         subtitle.setFont(juce::Font(juce::FontOptions(11.f)));
         subtitle.setColour(juce::Label::textColourId, kWarm);
-        status.setText("Collega la scheda audio e scegli una cartella NAM per cominciare.", juce::dontSendNotification);
+        status.setText("Collega la scheda audio, configura VST3 e scegli liberamente una cattura NAM.", juce::dontSendNotification);
         status.setColour(juce::Label::textColourId, kMuted);
         status.setFont(juce::Font(juce::FontOptions(12.5f)));
         current.setText("NESSUN PROFILO", juce::dontSendNotification);
@@ -113,7 +75,7 @@ public:
         current.setMinimumHorizontalScale(0.65f);
         level.setColour(juce::Label::textColourId, kText);
         level.setFont(juce::Font(juce::FontOptions(21.f, juce::Font::bold)));
-        info.setText("Selezione euristica, non riconoscimento dello stile musicale.", juce::dontSendNotification);
+        info.setText("Rig completamente manuale. Sei tu a scegliere i NAM e i VST3.", juce::dontSendNotification);
         info.setColour(juce::Label::textColourId, kMuted);
         info.setFont(juce::Font(juce::FontOptions(11.5f)));
         info.setJustificationType(juce::Justification::topLeft);
@@ -136,13 +98,13 @@ public:
         signalLabel.setColour(juce::Label::textColourId, kGreen);
         deviceLabel.setText("Dispositivo: da selezionare",juce::dontSendNotification);
         sampleLabel.setText("Core Audio",juce::dontSendNotification);
-        categoryLabel.setText("CARICA UNA CARTELLA DI PROFILI .NAM",juce::dontSendNotification);
-        reasonLabel.setText("L'app analizza la dinamica del segnale in ingresso.",juce::dontSendNotification);
+        categoryLabel.setText("CARICA UN PROFILO O UNA CARTELLA .NAM",juce::dontSendNotification);
+        reasonLabel.setText("Scegli un NAM dalla libreria oppure usa il segnale DI.",juce::dontSendNotification);
         countLabel.setText("0 MODELLI CARICATI",juce::dontSendNotification);
         irLabel.setText("Cabinet IR: nessuna",juce::dontSendNotification);
 
         // Master output: UI writes an atomic dB target; audio applies a smoothed gain
-        // after the NAM and cabinet IR to avoid clicks while adjusting level.
+        // after NAM, cabinet IR, Sculpt Channel and the POST VST3 slots.
         masterLabel.setText("0.0 dB", juce::dontSendNotification);
         masterLabel.setFont(juce::Font(juce::FontOptions(13.0f, juce::Font::bold)));
         masterLabel.setColour(juce::Label::textColourId, kText);
@@ -155,7 +117,7 @@ public:
         masterSlider.setColour(juce::Slider::trackColourId, kAccent);
         masterSlider.setColour(juce::Slider::backgroundColourId, kPanelAlt);
         masterSlider.setColour(juce::Slider::thumbColourId, kWarm);
-        masterSlider.setTooltip("Volume dopo NAM e cabinet IR. Da -60 dB (mute) a +6 dB. Doppio clic: 0 dB.");
+        masterSlider.setTooltip("Volume dopo tutti gli insert VST3. Da -60 dB (mute) a +6 dB. Doppio clic: 0 dB.");
         masterSlider.onValueChange = [this] {
             const float db = static_cast<float>(masterSlider.getValue());
             masterGainDb.store(db, std::memory_order_relaxed);
@@ -169,7 +131,7 @@ public:
         // TONE3000 integration: direct search via the official website in the user's
         // browser, without scraping, API secrets, or unsupported catalog endpoints.
         // Future in-app results/downloads require TONE3000 OAuth PKCE approval.
-        tone3000Brand.setText("POWERED BY TONE3000  /  ONLINE NAM SEARCH", juce::dontSendNotification);
+        tone3000Brand.setText("TONE3000  /  CERCA CATTURE NAM ONLINE", juce::dontSendNotification);
         tone3000Brand.setColour(juce::Label::textColourId, kWarm);
         tone3000Brand.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
         tone3000Brand.setJustificationType(juce::Justification::centredLeft);
@@ -197,61 +159,66 @@ public:
         rigButton.onClick = [this] { showRigPanel(); };
         addAndMakeVisible(rigButton);
         audioButton.setButtonText("CONFIGURA AUDIO");
-        folderButton.setButtonText("IMPORTA NAM SCARICATI");
+        folderButton.setButtonText("CARICA NAM / CARTELLA");
         irButton.setButtonText("CARICA CABINET IR");
-        lockButton.setButtonText("LOCK");
-        autoButton.setButtonText("AUTO");
-        autoButton.setComponentID("auto");
-        lockButton.setComponentID("lock");
-        likeButton.setButtonText("♥  MI PIACE");
-        skipButton.setButtonText("PASSA OLTRE");
+        previousNamButton.setButtonText("◀ NAM");
+        nextNamButton.setButtonText("NAM ▶");
+        previousPageButton.setButtonText("◀ PAGINA");
+        nextPageButton.setButtonText("PAGINA ▶");
         for (auto* c : std::initializer_list<juce::Component*>{&title,&subtitle,&status,&current,&level,&info,
-                 &audioButton,&folderButton,&irButton,&lockButton,&autoButton,&likeButton,&skipButton})
+                 &audioButton,&folderButton,&irButton,&previousNamButton,&nextNamButton,&previousPageButton,&nextPageButton})
             addAndMakeVisible(c);
-        for (auto* b : {&audioButton,&folderButton,&irButton,&lockButton,&autoButton,&likeButton,&skipButton}) {
+        for (auto* b : {&audioButton,&folderButton,&irButton,&previousNamButton,&nextNamButton,&previousPageButton,&nextPageButton})
             b->setColour(juce::TextButton::textColourOffId, kText);
-        }
+
+        // Explicit NAM selection is the only way to change captures; no background ranking.
+        namSelector.setTextWhenNothingSelected("Carica una libreria NAM");
+        namSelector.setColour(juce::ComboBox::backgroundColourId, kPanelAlt);
+        namSelector.setColour(juce::ComboBox::textColourId, kText);
+        namSelector.setColour(juce::ComboBox::outlineColourId, kAccent.withAlpha(0.50f));
+        namSelector.setColour(juce::ComboBox::arrowColourId, kWarm);
+        namSelector.onChange = [this] {
+            const int id=namSelector.getSelectedId();
+            if (id > 0) selectNam(id-2);  // id 1 = bypass; 2+ = loaded captures
+        };
+        addAndMakeVisible(namSelector);
+        namSelector.addItem("BYPASS NAM / SEGNALE DI",1);
+        namSelector.setSelectedId(1,juce::dontSendNotification);
+
         for (int i=0;i<5;++i) {
-            auto& label = suggestionNames[static_cast<size_t>(i)];
-            label.setColour(juce::Label::textColourId, kText);
+            auto& label=libraryNames[static_cast<size_t>(i)];
+            label.setColour(juce::Label::textColourId,kText);
             label.setFont(juce::Font(juce::FontOptions(13.5f, juce::Font::bold)));
             label.setMinimumHorizontalScale(0.7f);
             addAndMakeVisible(label);
-            auto& b = suggestionButtons[static_cast<size_t>(i)];
-            b.setButtonText("PROVA");
-            b.setColour(juce::TextButton::textColourOffId, kText);
+            auto& b=libraryButtons[static_cast<size_t>(i)];
+            b.setButtonText("USA");
+            b.setColour(juce::TextButton::textColourOffId,kText);
             addAndMakeVisible(b);
-            b.onClick = [this,i] {
-                const int index = suggestedIndexes[static_cast<size_t>(i)];
-                if (index < 0 || index >= static_cast<int>(captures.size())) return;
-                automatic.store(false);
-                locked.store(true);
-                requestedIndex.store(index);
-                refreshControls();
-                status.setText("Profilo selezionato manualmente. Premi AUTO per riprendere la ricerca.",juce::dontSendNotification);
+            b.onClick=[this,i] {
+                const int index=libraryIndexes[static_cast<size_t>(i)];
+                if (index >= 0) selectNam(index);
             };
         }
         audioButton.onClick = [this] { showAudioSettings(); };
         folderButton.onClick = [this] { chooseNAMFolder(); };
-        folderButton.setTooltip("Scegli una cartella con file .nam gia estratti, di solito in Download.");
+        folderButton.setTooltip("Scegli un profilo .nam oppure una cartella di catture.");
         irButton.onClick = [this] { chooseIR(); };
-        lockButton.onClick = [this] { locked.store(!locked.load()); refreshControls(); };
-        autoButton.onClick = [this] {
-            automatic.store(!automatic.load());
-            if (automatic.load()) locked.store(false);
-            refreshControls();
+        previousNamButton.onClick=[this] { changeNam(-1); };
+        nextNamButton.onClick=[this] { changeNam(1); };
+        previousPageButton.onClick=[this] { libraryPage=juce::jmax(0,libraryPage-5);timerCallback(); };
+        nextPageButton.onClick=[this] {
+            if (libraryPage+5 < static_cast<int>(captures.size())) libraryPage+=5;
+            timerCallback();
         };
-        likeButton.onClick = [this] { rate(+1); };
-        skipButton.onClick = [this] { rate(-1); };
-        for (auto& value : feedback) value.store(0);
-        refreshControls();
+        modeLabel.setText("●  SELEZIONE NAM MANUALE",juce::dontSendNotification);
         setSize(1200, 740);
         setAudioChannels(1, 2);
         startTimerHz(10);
         timerCallback();
     }
 
-    ~AutoToneWindow() override {
+    ~GuitarRigWindow() override {
         stopTimer();
         activePluginWindow.reset();
         shutdownAudio();
@@ -263,7 +230,6 @@ public:
         (void) maxBuffer; // engine processes in 2048-sample chunks
         inputScratch.fill(0);
         outA.fill(0); outB.fill(0);
-        brain.reset(sampleRate);
         sampleRateLive.store(sampleRate);
         masterGain.reset(sampleRate, 0.03); // 30 ms gain smoothing; audio thread only
         const float initialDb = masterGainDb.load(std::memory_order_relaxed);
@@ -273,10 +239,10 @@ public:
         vstChain.prepare(sampleRate, kBlock);
         gateEnvelope = 0.f;
         gateGain = 0.f;
-        activeIndex = captures.empty() ? -1 : 0;
+        const int chosen=requestedIndex.load(std::memory_order_relaxed);
+        activeIndex=(chosen>=0 && chosen<static_cast<int>(captures.size())) ? chosen : -1;
         fadingFrom = -1;
         fadeRemaining = 0;
-        shownIndex.store(activeIndex);
     }
 
     void getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill) override {
@@ -285,16 +251,11 @@ public:
         const int start = bufferToFill.startSample;
         const int count = bufferToFill.numSamples;
         const int numChannels = audio->getNumChannels();
-        if (captures.empty()) {
-            audio->clear(start, count);
-            levelDb.store(-90.0f);
-            return;
-        }
         int offset = 0;
         while (offset < count) {
             const int n = std::min(kBlock, count - offset);
             const float* input = audio->getReadPointer(0, start + offset);
-            // Preserve DI for AutoTone analysis; effects never affect tone selection.
+            // Preserve dry DI for input metering. Tone choice is always manual.
             std::copy_n(input, n, dryInput.begin());
             const float threshold = gainFromDb(gateThresholdDb.load(std::memory_order_relaxed));
             const bool doGate = gateEnabled.load(std::memory_order_relaxed);
@@ -319,11 +280,10 @@ public:
             for (int j=0;j<n;++j)
                 inputScratch[static_cast<size_t>(j)] = 0.5f*(preL[j]+preR[j]);
             const int desired = requestedIndex.load();
-            if (desired >= 0 && desired < static_cast<int>(captures.size()) && desired != activeIndex && fadeRemaining <= 0) {
+            if (desired >= -1 && desired < static_cast<int>(captures.size()) && desired != activeIndex && fadeRemaining <= 0) {
                 fadingFrom = activeIndex;
                 activeIndex = desired;
                 fadeRemaining = 2048; // approx 43ms @48 kHz
-                shownIndex.store(activeIndex);
             }
             if (activeIndex >= 0) {
                 auto& entry = captures[static_cast<size_t>(activeIndex)];
@@ -335,18 +295,24 @@ public:
             } else {
                 for (int i=0;i<n;++i) outA[static_cast<size_t>(i)] = inputScratch[static_cast<size_t>(i)] * 0.25f;
             }
-            if (fadeRemaining > 0 && fadingFrom >= 0) {
-                auto& oldEntry = captures[static_cast<size_t>(fadingFrom)];
-                const float gi = gainFromDb(juce::jlimit(-18.f,18.f,oldEntry.recommendedInput));
-                const float go = 0.25f * gainFromDb(juce::jlimit(-18.f,18.f,oldEntry.recommendedOutput));
-                for (int i=0;i<n;++i) driven[static_cast<size_t>(i)] = inputScratch[static_cast<size_t>(i)] * gi;
-                oldEntry.model->Process(driven.data(), outB.data(), static_cast<size_t>(n));
+            if (fadeRemaining > 0) {
+                float oldGain=1.0f;
+                if (fadingFrom >= 0) {
+                    auto& oldEntry = captures[static_cast<size_t>(fadingFrom)];
+                    const float gi = gainFromDb(juce::jlimit(-18.f,18.f,oldEntry.recommendedInput));
+                    oldGain = 0.25f * gainFromDb(juce::jlimit(-18.f,18.f,oldEntry.recommendedOutput));
+                    for (int i=0;i<n;++i) driven[static_cast<size_t>(i)] = inputScratch[static_cast<size_t>(i)] * gi;
+                    oldEntry.model->Process(driven.data(), outB.data(), static_cast<size_t>(n));
+                } else {
+                    // The old signal was clean DI; crossfade it when enabling a NAM.
+                    for (int i=0;i<n;++i) outB[static_cast<size_t>(i)] = inputScratch[static_cast<size_t>(i)] * 0.25f;
+                }
                 for (int i=0;i<n;++i) {
-                    const float a = 1.0f - juce::jlimit(0.f, 1.f, float(fadeRemaining - i) / 2048.0f);
-                    outA[static_cast<size_t>(i)] = outB[static_cast<size_t>(i)] * go * (1.0f-a) + outA[static_cast<size_t>(i)] * a;
+                    const float a = 1.0f - juce::jlimit(0.f,1.f,float(fadeRemaining-i)/2048.0f);
+                    outA[static_cast<size_t>(i)] = outB[static_cast<size_t>(i)] * oldGain * (1.f-a) + outA[static_cast<size_t>(i)]*a;
                 }
                 fadeRemaining -= n;
-                if (fadeRemaining <= 0) fadingFrom = -1;
+                if (fadeRemaining <= 0) fadingFrom=-1;
             }
             if (irLoaded.load()) {
                 cabBuffer.copyFrom(0,0,outA.data(),n);
@@ -355,8 +321,8 @@ public:
                 juce::dsp::ProcessContextReplacing<float> context(slice);
                 cab.process(context);
                 std::copy_n(cabBuffer.getReadPointer(0), n, outA.begin());
-            } else {
-                // Basic lowpass for safer playback without a cabinet IR; not a cabinet simulation.
+            } else if (activeIndex >= 0) {
+                // Simple lowpass for a loaded amp without a cabinet IR; not a cabinet simulation.
                 const float pole = std::exp(-2.0f * juce::MathConstants<float>::pi * 5500.f /
                                 static_cast<float>(std::max(8000.0, sampleRateLive.load())));
                 for (int i=0;i<n;++i) {
@@ -382,19 +348,14 @@ public:
                 if (right != nullptr) right[i] = juce::jlimit(-0.85f,0.85f,processedR[i]*gain);
             }
             for (int ch=2;ch<numChannels;++ch) audio->copyFrom(ch,start+offset,*audio,0,start+offset,n);
-            if (automatic.load()) {
-                for (size_t j = 0; j < currentFeedback.size(); ++j)
-                    currentFeedback[j] = feedback[j].load(std::memory_order_relaxed);
-                auto result = brain.update(dryInput.data(), n, characters, currentFeedback,
-                                          activeIndex, locked.load());
-                levelDb.store(result.level);
-                analysisTarget.store(result.targetDrive);
-                if (result.index >= 0) requestedIndex.store(result.index);
-            } else {
-                double sum=0;
-                for (int i=0;i<n;++i) sum += dryInput[static_cast<size_t>(i)]*dryInput[static_cast<size_t>(i)];
-                levelDb.store(20.f*std::log10(std::max(1.e-8, std::sqrt(sum/n))));
+            // Level meter only: no dynamics-to-tone inference and no automatic switching.
+            double energy=0.0;
+            for (int i=0;i<n;++i) {
+                const double x=dryInput[static_cast<size_t>(i)];
+                energy+=x*x;
             }
+            levelDb.store(static_cast<float>(20.0*std::log10(
+                std::max(1.e-8,std::sqrt(energy/std::max(1,n))))));
             offset += n;
         }
     }
@@ -429,8 +390,8 @@ public:
         panel(292,112,555,548);
         panel(865,112,310,548);
         caption("01  /  AUDIO & CONTROL",43,132,218);
-        caption("02  /  CURRENT TONE",316,132,310);
-        caption("03  /  NEXT MATCHES",886,132,262);
+        caption("02  /  NAM / CABINET",316,132,310);
+        caption("03  /  NAM LIBRARY",886,132,262);
 
         g.setColour(kMuted.withAlpha(0.18f));
         g.drawLine(42.f,270.f,256.f,270.f,1.f);
@@ -439,7 +400,7 @@ public:
         caption("LIVE SIGNAL",43,285,210);
         caption("MASTER OUTPUT",43,407,148);
         caption("CONTROLS",43,484,210);
-        caption("TONE PROFILE",316,185,310);
+        caption("NAM CAPTURE  /  SCELTA MANUALE",316,185,340);
 
         // In real operation this meter follows the input level. A missing device is never shown as active.
         const float meterX=43.f, meterY=317.f, meterW=210.f, meterH=11.f;
@@ -467,7 +428,7 @@ public:
             g.drawEllipse(cx-23.f*i,cy-23.f*i,46.f*i,46.f*i,1.f);
         }
         juce::Path trace;
-        const float drive=analysisTarget.load();
+        const float drive=0.46f; // Decorative trace only, never drives model selection.
         for (int i=0;i<=240;++i) {
             const float x=430.f + i*1.17f;
             const float envelope=std::pow(std::max(0.f,1.f-std::abs(i-120.f)/120.f),1.6f);
@@ -481,16 +442,16 @@ public:
 
         g.setColour(kPanelAlt);
         g.fillRoundedRectangle(juce::Rectangle<float>(314.f,495.f,510.f,108.f),10.f);
-        caption("ANALISI DEL SEGNALE",329,505,210);
+        caption("SIGNAL CHAIN",329,505,210);
         g.setColour(kMuted);
         g.setFont(juce::Font(juce::FontOptions(11.f)));
-        g.drawText("La scelta usa intensità e risposta alla distorsione. Non riconosce brani o generi.",
+        g.drawText("INPUT  >  GATE  >  PRE VST3  >  NAM  >  IR  >  SCULPT CH  >  POST  >  OUTPUT",
                     329,571,480,25,juce::Justification::centredLeft,true);
 
         for (int i=0;i<5;++i) {
             auto r=juce::Rectangle<float>(884.f,185.f+i*80.f,273.f,70.f);
-            const bool chosen=suggestedIndexes[static_cast<size_t>(i)]==shownIndex.load()
-                && shownIndex.load()>=0;
+            const bool chosen=libraryIndexes[static_cast<size_t>(i)]==requestedIndex.load()
+                && requestedIndex.load()>=0;
             g.setColour(chosen ? juce::Colour(0xff302b2c) : kPanelAlt);
             g.fillRoundedRectangle(r,9.f);
             g.setColour(chosen ? kAccent.withAlpha(0.7f) : juce::Colours::white.withAlpha(0.06f));
@@ -504,7 +465,7 @@ public:
         g.drawLine(24.f,674.f,1175.f,674.f,1.f);
         g.setColour(kMuted);
         g.setFont(juce::Font(juce::FontOptions(10.5f)));
-        g.drawText("VST3 HOST  /  NAM  /  SCULPT CHANNEL",903,687,275,24,juce::Justification::centredRight,true);
+        g.drawText("MANUAL GUITAR RIG  /  VST3  /  NAM",903,687,275,24,juce::Justification::centredRight,true);
     }
 
     void resized() override {
@@ -520,24 +481,25 @@ public:
         signalLabel.setBounds(43,375,210,22);
         masterLabel.setBounds(170,404,84,22);
         masterSlider.setBounds(40,430,216,34);
-        autoButton.setBounds(43,508,101,37);
-        lockButton.setBounds(153,508,101,37);
+        previousNamButton.setBounds(43,508,101,37);
+        nextNamButton.setBounds(153,508,101,37);
         folderButton.setBounds(43,554,211,35);
         irButton.setBounds(43,597,211,35);
         countLabel.setBounds(43,635,211,20);
         current.setBounds(322,221,494,60);
-        categoryLabel.setBounds(327,280,484,32);
+        categoryLabel.setBounds(327,276,484,29);
+        namSelector.setBounds(331,315,476,34);
         irLabel.setBounds(327,454,484,28);
         reasonLabel.setBounds(329,532,480,32);
         modeLabel.setBounds(329,614,190,27);
         rigButton.setBounds(532,612,286,35);
         for (int i=0;i<5;++i) {
             const int y=199+i*80;
-            suggestionNames[static_cast<size_t>(i)].setBounds(927,y,140,42);
-            suggestionButtons[static_cast<size_t>(i)].setBounds(1080,y+8,66,31);
+            libraryNames[static_cast<size_t>(i)].setBounds(927,y,140,42);
+            libraryButtons[static_cast<size_t>(i)].setBounds(1080,y+8,66,31);
         }
-        likeButton.setBounds(870,618,142,30);
-        skipButton.setBounds(1020,618,142,30);
+        previousPageButton.setBounds(870,618,142,30);
+        nextPageButton.setBounds(1020,618,142,30);
         status.setBounds(27,681,860,26);
         info.setBounds(0,0,0,0); // already explained in the central analysis panel
     }
@@ -559,7 +521,7 @@ private:
 
     class RigPanel final : public juce::Component, private juce::Timer {
     public:
-        explicit RigPanel(AutoToneWindow& parent) : owner(parent) {
+        explicit RigPanel(GuitarRigWindow& parent) : owner(parent) {
             setOpaque(true);
             gateLabel.setText("INPUT NOISE GATE  /  FISSO, PRIMA DEI VST3",juce::dontSendNotification);
             gateLabel.setColour(juce::Label::textColourId,kWarm);
@@ -660,7 +622,7 @@ private:
                 bypasses[static_cast<size_t>(i)].setButtonText(owner.vstChain.enabled(i)?"ON":"BYPASS");
             }
         }
-        AutoToneWindow& owner;
+        GuitarRigWindow& owner;
         juce::Label gateLabel,caption,hint;
         juce::TextButton gateBypass;
         juce::Slider threshold;
@@ -671,7 +633,7 @@ private:
     void showRigPanel() {
         juce::DialogWindow::LaunchOptions opt;
         opt.content.setOwned(new RigPanel(*this));
-        opt.dialogTitle = "SCULPT AUTOTONE  /  VST3 FX RIG";
+        opt.dialogTitle = "SCULPT GUITAR RIG  /  VST3 FX";
         opt.dialogBackgroundColour = kBg;
         opt.useNativeTitleBar = true;
         opt.escapeKeyTriggersCloseButton = true;
@@ -691,7 +653,7 @@ private:
         menu.addSeparator();
         menu.addItem(99999,"SCEGLI UN FILE .VST3... ");
         menu.showMenuAsync(juce::PopupMenu::Options(),
-            [safe=juce::Component::SafePointer<AutoToneWindow>(this),slot,paths](int id) {
+            [safe=juce::Component::SafePointer<GuitarRigWindow>(this),slot,paths](int id) {
                 if (safe==nullptr || id==0) return;
                 if(id==99999) safe->browsePluginBundle(slot);
                 else if(id>=1 && id<=paths.size()) safe->loadPluginSlot(slot,paths.getReference(id-1));
@@ -704,7 +666,7 @@ private:
         vstChooser=std::make_unique<juce::FileChooser>("Scegli plugin VST3",home,"*.vst3");
         vstChooser->launchAsync(juce::FileBrowserComponent::openMode |
              juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::canSelectDirectories,
-             [safe=juce::Component::SafePointer<AutoToneWindow>(this),slot](const juce::FileChooser& chooser){
+             [safe=juce::Component::SafePointer<GuitarRigWindow>(this),slot](const juce::FileChooser& chooser){
                  if(safe!=nullptr && chooser.getResult().exists()) safe->loadPluginSlot(slot,chooser.getResult());
              });
     }
@@ -770,13 +732,14 @@ private:
         auto downloads = juce::File::getSpecialLocation(juce::File::userHomeDirectory).getChildFile("Downloads");
         if (! downloads.isDirectory())
             downloads = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
-        fileChooser = std::make_unique<juce::FileChooser>("Scegli una cartella con profili .nam estratti", downloads);
-        fileChooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
+        fileChooser = std::make_unique<juce::FileChooser>("Scegli un .nam o una cartella di .nam", downloads, "*.nam");
+        fileChooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories
+                                 | juce::FileBrowserComponent::canSelectFiles,
                                 [this](const juce::FileChooser& chooser) {
             const auto folder = chooser.getResult();
-            if (folder.isDirectory()) {
-                status.setText("Caricamento dei NAM e analisi timbrica...",juce::dontSendNotification);
-                juce::MessageManager::callAsync([safe = juce::Component::SafePointer<AutoToneWindow>(this), folder]() {
+            if (folder.isDirectory() || (folder.existsAsFile() && folder.hasFileExtension(".nam"))) {
+                status.setText("Caricamento dei profili NAM...",juce::dontSendNotification);
+                juce::MessageManager::callAsync([safe = juce::Component::SafePointer<GuitarRigWindow>(this), folder]() {
                     if (safe != nullptr) safe->loadModels(folder);
                 });
             }
@@ -787,9 +750,12 @@ private:
         auto* deviceBeforeShutdown = deviceManager.getCurrentAudioDevice();
         const int sr = static_cast<int>(deviceBeforeShutdown ? deviceBeforeShutdown->getCurrentSampleRate() : 48000);
         shutdownAudio(); // invariant: models may only be created/destroyed while callback is stopped
-        captures.clear(); characters.clear(); currentFeedback.clear();
-        for (auto& r : feedback) r.store(0);
-        auto files = folder.findChildFiles(juce::File::findFiles, true, "*.nam");
+        captures.clear();
+        namSelector.clear(juce::dontSendNotification);
+        libraryPage=0;
+        juce::Array<juce::File> files;
+        if (folder.existsAsFile() && folder.hasFileExtension(".nam")) files.add(folder);
+        else files=folder.findChildFiles(juce::File::findFiles, true, "*.nam");
         std::sort(files.begin(), files.end(), [](const auto& a, const auto& b) { return a.getFullPathName() < b.getFullPathName(); });
         NeuralAudio::NeuralModelLoader loader;
         loader.SetDefaultMaxAudioBufferSize(kBlock);
@@ -807,21 +773,21 @@ private:
                 e.name = file.getFileNameWithoutExtension();
                 e.recommendedInput = ptr->GetRecommendedInputDBAdjustment();
                 e.recommendedOutput = ptr->GetRecommendedOutputDBAdjustment();
-                e.character = measureCharacter(*ptr, static_cast<double>(sr));
                 e.model = std::move(ptr);
-                characters.push_back(e.character);
-                currentFeedback.push_back(0);
                 captures.push_back(std::move(e));
             } catch (const std::exception&) { ++fails; }
         }
         requestedIndex.store(captures.empty() ? -1 : 0);
-        shownIndex.store(captures.empty() ? -1 : 0);
+        namSelector.addItem("BYPASS NAM / SEGNALE DI",1);
+        for (int i=0;i<static_cast<int>(captures.size());++i)
+            namSelector.addItem(captures[static_cast<size_t>(i)].name,i+2);
+        namSelector.setSelectedId(captures.empty()?1:2,juce::dontSendNotification);
         setAudioChannels(1,2);
         if (captures.empty()) {
-            status.setText("Nessun NAM compatibile caricato. Controlla i file .nam.",juce::dontSendNotification);
+            status.setText("Nessun NAM caricato. Il rig resta utilizzabile con il segnale DI e i VST3.",juce::dontSendNotification);
             current.setText("NESSUN PROFILO",juce::dontSendNotification);
         } else {
-            status.setText(juce::String(captures.size())+" NAM caricati. Suona: la scelta si aggiorna automaticamente. Scartati: "+juce::String(fails), juce::dontSendNotification);
+            status.setText(juce::String(captures.size())+" NAM caricati. Seleziona manualmente la cattura. Scartati: "+juce::String(fails), juce::dontSendNotification);
             current.setText(captures.front().name,juce::dontSendNotification);
         }
     }
@@ -837,73 +803,63 @@ private:
                     juce::dsp::Convolution::Normalise::yes);
                 irLoaded.store(true);
                 irName = f.getFileName();
-                status.setText("IR caricata: "+irName+". Suona per cercare il NAM.",juce::dontSendNotification);
+                status.setText("IR caricata: "+irName+".",juce::dontSendNotification);
             }
         });
     }
 
-    void rate(int delta) {
-        const int i = shownIndex.load();
-        if (i < 0 || i >= static_cast<int>(captures.size())) return;
-        auto& item = feedback[static_cast<size_t>(i)];
-        const int vote = juce::jlimit(-3,3,item.load()+delta);
-        item.store(vote);
-        // Preference snapshot is updated on the audio thread via atomics; no vector mutation.
-        status.setText(captures[static_cast<size_t>(i)].name + (delta>0 ? " · gradimento aggiunto" : " · penalizzato nelle ricerche"),juce::dontSendNotification);
+    // NAM changes are user-initiated. The existing audio callback crossfades captures.
+    void selectNam(int index) {
+        if (index < -1 || index >= static_cast<int>(captures.size())) return;
+        requestedIndex.store(index, std::memory_order_relaxed);
+        namSelector.setSelectedId(index+2, juce::dontSendNotification);
+        libraryPage=index<0?0:(index/5)*5;
+        status.setText(index<0 ? "NAM bypass: segnale DI tramite PRE / POST VST3"
+                               : "NAM selezionato: "+captures[static_cast<size_t>(index)].name,
+                       juce::dontSendNotification);
+        timerCallback();
     }
 
-    void refreshControls() {
-        autoButton.setToggleState(automatic.load(), juce::dontSendNotification);
-        lockButton.setToggleState(locked.load(), juce::dontSendNotification);
-        modeLabel.setText(locked.load() ? "●  PROFILO BLOCCATO" :
-                          automatic.load() ? "●  RICERCA AUTOMATICA ATTIVA" : "●  SELEZIONE MANUALE",
-                          juce::dontSendNotification);
-        modeLabel.setColour(juce::Label::textColourId,locked.load() ? kWarm : kGreen);
+    void changeNam(int offset) {
+        if (captures.empty()) return;
+        const int current=requestedIndex.load(std::memory_order_relaxed);
+        const int next=juce::jlimit(-1,static_cast<int>(captures.size())-1,current+offset);
+        selectNam(next);
     }
 
     void timerCallback() override {
-        const int selected=shownIndex.load();
-        const bool hasModel = selected>=0 && selected<static_cast<int>(captures.size());
-        if(hasModel) {
-            const auto& e=captures[static_cast<size_t>(selected)];
-            current.setText(e.name,juce::dontSendNotification);
-            const auto character=e.character;
-            categoryLabel.setText(character<0.31f ? "LOW DRIVE  /  CLEAN" :
-                                  character<0.69f ? "MID DRIVE  /  CRUNCH" : "HIGH DRIVE  /  SATURATED",
-                                  juce::dontSendNotification);
-        } else {
-            current.setText("NESSUN PROFILO",juce::dontSendNotification);
-            categoryLabel.setText("CARICA UNA CARTELLA DI PROFILI .NAM",juce::dontSendNotification);
-        }
+        const int selected=requestedIndex.load(std::memory_order_relaxed);
+        const bool hasModel=selected>=0 && selected<static_cast<int>(captures.size());
+        current.setText(hasModel ? captures[static_cast<size_t>(selected)].name
+                                 : juce::String("NAM BYPASS  /  SEGNALE DI"),juce::dontSendNotification);
+        categoryLabel.setText(hasModel ? "CATTURA SELEZIONATA MANUALMENTE"
+                                       : "CARICA UN PROFILO O UNA CARTELLA .NAM",juce::dontSendNotification);
         level.setText(juce::String(levelDb.load(),1)+" dBFS",juce::dontSendNotification);
-        const float db = levelDb.load();
+        const float db=levelDb.load();
         signalLabel.setText(db > -65.f ? "●  SEGNALE IN INGRESSO" : "○  IN ATTESA DI SEGNALE",juce::dontSendNotification);
         signalLabel.setColour(juce::Label::textColourId,db > -65.f ? kGreen : kMuted);
-        auto* device = deviceManager.getCurrentAudioDevice();
+        auto* device=deviceManager.getCurrentAudioDevice();
         deviceLabel.setText(device ? device->getName() : "Nessuna scheda selezionata",juce::dontSendNotification);
         sampleLabel.setText(juce::String(juce::roundToInt(sampleRateLive.load()))+" Hz   /   Core Audio",juce::dontSendNotification);
         countLabel.setText(juce::String(captures.size())+" PROFILI NAM IN LIBRERIA",juce::dontSendNotification);
-        irLabel.setText(irName.isNotEmpty() ? "CABINET IR  /  "+irName : "CABINET IR  /  NON CARICATA",juce::dontSendNotification);
-        reasonLabel.setText(hasModel ? "Intensità stimata: "+juce::String(juce::roundToInt(analysisTarget.load()*100.f))+
-                                    "%  ·  Drive del profilo: "+juce::String(juce::roundToInt(captures[static_cast<size_t>(selected)].character*100.f))+"%" :
-                                     "In attesa di una libreria di modelli...",juce::dontSendNotification);
-        std::vector<int> ranked;
-        ranked.reserve(captures.size());
-        for (int i=0;i<static_cast<int>(captures.size());++i) ranked.push_back(i);
-        const float target=analysisTarget.load();
-        auto metric=[&](int i) {
-            return std::abs(captures[static_cast<size_t>(i)].character-target) -
-                0.055f*juce::jlimit(-3,3,feedback[static_cast<size_t>(i)].load());
-        };
-        std::sort(ranked.begin(),ranked.end(),[&](int a,int b) { return metric(a)<metric(b); });
+        irLabel.setText(irName.isNotEmpty()?"CABINET IR  /  "+irName:"CABINET IR  /  NON CARICATA",juce::dontSendNotification);
+        reasonLabel.setText(hasModel?"NAM: "+captures[static_cast<size_t>(selected)].name
+                                     : juce::String("Il segnale DI passa nei VST3 anche senza NAM."),juce::dontSendNotification);
+        modeLabel.setText("●  CONTROLLO MANUALE",juce::dontSendNotification);
         for (int i=0;i<5;++i) {
-            const bool visible=i<static_cast<int>(ranked.size());
-            suggestedIndexes[static_cast<size_t>(i)]=visible?ranked[static_cast<size_t>(i)]:-1;
-            auto& l=suggestionNames[static_cast<size_t>(i)];
-            auto& b=suggestionButtons[static_cast<size_t>(i)];
-            l.setVisible(visible); b.setVisible(visible);
-            if (visible) l.setText(captures[static_cast<size_t>(ranked[static_cast<size_t>(i)])].name,juce::dontSendNotification);
+            const int index=libraryPage+i;
+            const bool visible=index<static_cast<int>(captures.size());
+            libraryIndexes[static_cast<size_t>(i)]=visible ? index : -1;
+            auto& label=libraryNames[static_cast<size_t>(i)];
+            auto& button=libraryButtons[static_cast<size_t>(i)];
+            label.setVisible(visible);
+            button.setVisible(visible);
+            if(visible) label.setText(captures[static_cast<size_t>(index)].name,juce::dontSendNotification);
         }
+        previousNamButton.setEnabled(!captures.empty() && selected>=0);
+        nextNamButton.setEnabled(!captures.empty() && selected < static_cast<int>(captures.size())-1);
+        previousPageButton.setEnabled(libraryPage>0);
+        nextPageButton.setEnabled(libraryPage+5 < static_cast<int>(captures.size()));
         repaint();
     }
 
@@ -911,23 +867,21 @@ private:
     juce::Label title, subtitle, status, current, level, info, tone3000Brand, masterLabel;
     juce::Slider masterSlider;
     juce::TextEditor tone3000Query;
+    juce::ComboBox namSelector;
     juce::TextButton tone3000Search, rigButton;
     juce::Label deviceLabel, sampleLabel, categoryLabel, reasonLabel, signalLabel, countLabel, irLabel, modeLabel;
-    std::array<juce::Label,5> suggestionNames;
-    std::array<juce::TextButton,5> suggestionButtons;
-    std::array<int,5> suggestedIndexes{{-1,-1,-1,-1,-1}};
-    juce::TextButton audioButton, folderButton, irButton, lockButton, autoButton, likeButton, skipButton;
+    std::array<juce::Label,5> libraryNames;
+    std::array<juce::TextButton,5> libraryButtons;
+    std::array<int,5> libraryIndexes{{-1,-1,-1,-1,-1}};
+    juce::TextButton audioButton, folderButton, irButton, previousNamButton, nextNamButton, previousPageButton, nextPageButton;
+    int libraryPage=0;
     std::unique_ptr<juce::FileChooser> fileChooser, irChooser, vstChooser;
     std::unique_ptr<HostedEditorWindow> activePluginWindow;
     int activePluginEditorSlot=-1;
     std::vector<Capture> captures;
-    std::vector<float> characters;
-    std::vector<int> currentFeedback; // allocated while audio is stopped; refreshed from atomics in callback
-    std::array<std::atomic<int>, kMaxModels> feedback;
-    ToneBrain brain;
-    std::atomic<int> requestedIndex{-1}, shownIndex{-1};
-    std::atomic<bool> locked{false}, automatic{true}, irLoaded{false};
-    std::atomic<float> levelDb{-90.f}, analysisTarget{0.f}, masterGainDb{0.f};
+    std::atomic<int> requestedIndex{-1};
+    std::atomic<bool> irLoaded{false};
+    std::atomic<float> levelDb{-90.f}, masterGainDb{0.f};
     std::atomic<double> sampleRateLive{48000.};
     int activeIndex = -1, fadingFrom = -1, fadeRemaining = 0;
     float lowpassZ = 0.0f;
@@ -941,24 +895,24 @@ private:
     juce::AudioBuffer<float> cabBuffer{1,kBlock};
     juce::dsp::Convolution cab;
     juce::String irName;
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AutoToneWindow)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(GuitarRigWindow)
 };
 
 class SculptMainWindow final : public juce::DocumentWindow {
 public:
-    SculptMainWindow() : juce::DocumentWindow("Sculpt AutoTone — Beta", kBg, juce::DocumentWindow::allButtons) {}
+    SculptMainWindow() : juce::DocumentWindow("Sculpt Guitar Rig — Beta", kBg, juce::DocumentWindow::allButtons) {}
     void closeButtonPressed() override { juce::JUCEApplication::getInstance()->systemRequestedQuit(); }
 };
 
 class SculptApp final : public juce::JUCEApplication {
 public:
-    const juce::String getApplicationName() override { return "Sculpt AutoTone"; }
-    const juce::String getApplicationVersion() override { return "0.6.0-beta-vst3-rig"; }
+    const juce::String getApplicationName() override { return "Sculpt Guitar Rig"; }
+    const juce::String getApplicationVersion() override { return "0.7.0-beta-manual-rig"; }
     bool moreThanOneInstanceAllowed() override { return false; }
     void initialise(const juce::String&) override {
         mainWindow = std::make_unique<SculptMainWindow>();
         mainWindow->setUsingNativeTitleBar(true);
-        mainWindow->setContentOwned(new AutoToneWindow(), true);
+        mainWindow->setContentOwned(new GuitarRigWindow(), true);
         mainWindow->centreWithSize(1200,740);
         mainWindow->setResizable(false,false);
         mainWindow->setVisible(true);
