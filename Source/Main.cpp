@@ -5,6 +5,7 @@
 #include "GuitarTuner.h"
 #include <BinaryData.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -74,7 +75,16 @@ public:
     void drawButtonText(juce::Graphics& g, juce::TextButton& b, bool,bool) override {
         g.setColour(b.isEnabled() ? (b.getToggleState()?kWarm:kText) : kMuted.withAlpha(.5f));
         g.setFont(getTextButtonFont(b,b.getHeight()));
-        g.drawFittedText(b.getButtonText(),b.getLocalBounds().reduced(4,2),juce::Justification::centred,1,0.75f);
+        if(b.getTooltip().containsIgnoreCase("ricerca alfabetica")) {
+            auto textArea=b.getLocalBounds().reduced(9,3);
+            textArea.removeFromRight(19);
+            g.drawFittedText(b.getButtonText(),textArea,juce::Justification::centredLeft,1,.7f);
+            const float x=(float)b.getWidth()-16.f,y=(float)b.getHeight()*.5f;
+            juce::Path arrow;arrow.startNewSubPath(x-4.f,y-2.f);arrow.lineTo(x,y+2.f);arrow.lineTo(x+4.f,y-2.f);
+            g.setColour(kWarm);g.strokePath(arrow,juce::PathStrokeType(1.5f));
+        }else{
+            g.drawFittedText(b.getButtonText(),b.getLocalBounds().reduced(4,2),juce::Justification::centred,1,0.75f);
+        }
     }
     void drawComboBox(juce::Graphics& g, int w,int h,bool,
                       int,int,int,int,juce::ComboBox& box) override {
@@ -157,7 +167,7 @@ public:
         title.setText("SCULPT  /  GUITAR RIG", juce::dontSendNotification);
         title.setFont(juce::Font(juce::FontOptions(27.f, juce::Font::bold)));
         title.setColour(juce::Label::textColourId, kText);
-        subtitle.setText("NAM  /  VST3  /  CAB IR  /  SCULPT CH      /      BETA 1.3.5", juce::dontSendNotification);
+        subtitle.setText("NAM  /  VST3  /  CAB IR  /  SCULPT CH      /      BETA 1.3.6", juce::dontSendNotification);
         subtitle.setFont(juce::Font(juce::FontOptions(11.f)));
         subtitle.setColour(juce::Label::textColourId, kWarm);
         status.setText("Rig manuale: scegli i tuoi NAM e i tuoi VST3. Host VST3 corretto e impostazioni audio preservate.", juce::dontSendNotification);
@@ -609,6 +619,164 @@ private:
         std::function<void(const juce::Image&)> onSnapshot;
     };
 
+    // Searchable plugin catalogue. Stays inside the rig window (no extra host window).
+    // The search is by VST3 bundle name; only choosing a row loads any code.
+    class VstPickerOverlay final : public juce::Component, private juce::ListBoxModel {
+    public:
+        VstPickerOverlay() : results("VST3 disponibili", this) {
+            setOpaque(false);
+            title.setText("SELEZIONA PLUGIN VST3",juce::dontSendNotification);
+            title.setColour(juce::Label::textColourId,kText);
+            title.setFont(juce::Font(juce::FontOptions(20.f,juce::Font::bold)));
+            addAndMakeVisible(title);
+            caption.setText("Digita il nome. Elenco alfabetico A-Z.",juce::dontSendNotification);
+            caption.setColour(juce::Label::textColourId,kMuted);
+            caption.setFont(juce::Font(juce::FontOptions(12.f)));
+            addAndMakeVisible(caption);
+            query.setTextToShowWhenEmpty("Cerca plugin (es. delay, compressor, fabfilter)...",kMuted);
+            query.setReturnKeyStartsNewLine(false);
+            query.setColour(juce::TextEditor::backgroundColourId,juce::Colour(0xff12171a));
+            query.setColour(juce::TextEditor::textColourId,kText);
+            query.setColour(juce::TextEditor::outlineColourId,kWarm);
+            query.setColour(juce::TextEditor::focusedOutlineColourId,kWarm);
+            query.setColour(juce::CaretComponent::caretColourId,kWarm);
+            query.setFont(juce::Font(juce::FontOptions(15.f)));
+            query.onTextChange=[this]{filterResults();};
+            query.onReturnKey=[this]{chooseCurrent();};
+            query.onEscapeKey=[this]{close();};
+            addAndMakeVisible(query);
+            results.setOpaque(true);
+            results.setColour(juce::ListBox::backgroundColourId,juce::Colour(0xff101315));
+            results.setColour(juce::ListBox::outlineColourId,kWarm.withAlpha(.35f));
+            results.setColour(juce::ListBox::textColourId,kText);
+            results.setRowHeight(40);
+            results.setOutlineThickness(1);
+            addAndMakeVisible(results);
+            count.setColour(juce::Label::textColourId,kMuted);
+            count.setFont(juce::Font(juce::FontOptions(11.5f)));
+            addAndMakeVisible(count);
+            choose.setButtonText("CARICA VST3");
+            choose.onClick=[this]{chooseCurrent();};
+            addAndMakeVisible(choose);
+            browse.setButtonText("SFOGLIA FILE .VST3...");
+            browse.onClick=[this]{const auto slot=activeSlot;close();if(onBrowse)onBrowse(slot);};
+            addAndMakeVisible(browse);
+            dismiss.setButtonText("ANNULLA");
+            dismiss.onClick=[this]{close();};
+            addAndMakeVisible(dismiss);
+            setVisible(false);
+        }
+        ~VstPickerOverlay() override { results.setModel(nullptr); }
+        void open(int slot,const juce::Array<juce::File>& paths,
+                  std::function<void(int,const juce::File&)> selectFn,
+                  std::function<void(int)> browseFn) {
+            activeSlot=slot;
+            onChoose=std::move(selectFn);onBrowse=std::move(browseFn);
+            candidates.clear();
+            for(const auto& p:paths){
+                if(slot==VstChain::sculptSlot){
+                    const auto lower=p.getFileNameWithoutExtension().toLowerCase();
+                    if(!lower.contains("sculpt") || !(lower.contains("channel")||lower.contains("chan")))continue;
+                }
+                candidates.push_back(p);
+            }
+            std::stable_sort(candidates.begin(),candidates.end(),[](const juce::File& a,const juce::File& b){
+                const auto na=a.getFileNameWithoutExtension().toLowerCase();
+                const auto nb=b.getFileNameWithoutExtension().toLowerCase();
+                const int byName=na.compare(nb);
+                return byName==0 ? a.getFullPathName().compareIgnoreCase(b.getFullPathName())<0 : byName<0;
+            });
+            title.setText(slot==VstChain::sculptSlot?"SCULPT CHANNEL VST3":
+                "SCEGLI VST3 - "+juce::String(slot<4?"PRE ":"POST ")+juce::String(slot<4?slot+1:slot-4),
+                juce::dontSendNotification);
+            query.clear();
+            filterResults();
+            setVisible(true);
+            toFront(true);
+            query.grabKeyboardFocus();
+        }
+        void close(){setVisible(false);onChoose=nullptr;onBrowse=nullptr;}
+        int getNumRows() override {return (int)filtered.size();}
+        void paintListBoxItem(int row,juce::Graphics& g,int width,int height,bool selected) override {
+            if(row<0 || row>=(int)filtered.size())return;
+            if(selected){
+                g.setColour(juce::Colour(0xff3b2c1f));g.fillRect(0,0,width,height);
+                g.setColour(kWarm);g.fillRect(0,0,3,height);
+            }else if(row%2==0){g.setColour(juce::Colour(0xff1b1f20));g.fillRect(0,0,width,height);}
+            const auto& file=filtered[(size_t)row];
+            g.setColour(selected?kWarm:kText);
+            g.setFont(juce::Font(juce::FontOptions(13.7f,juce::Font::bold)));
+            g.drawFittedText(file.getFileNameWithoutExtension(),12,3,width-24,19,juce::Justification::centredLeft,1,.9f);
+            g.setColour(kMuted);g.setFont(juce::Font(juce::FontOptions(10.f)));
+            g.drawFittedText(file.getParentDirectory().getFullPathName(),12,23,width-24,14,juce::Justification::centredLeft,1,.65f);
+            g.setColour(juce::Colours::white.withAlpha(.05f));g.drawLine(10.f,(float)height-1.f,(float)width-10.f,(float)height-1.f,.6f);
+        }
+        void listBoxItemDoubleClicked(int row,const juce::MouseEvent&) override {chooseRow(row);}
+        void returnKeyPressed(int row) override {chooseRow(row);}
+        void paint(juce::Graphics& g) override {
+            g.fillAll(juce::Colours::black.withAlpha(.76f));
+            auto p=dialogBounds().toFloat();
+            g.setGradientFill(juce::ColourGradient(juce::Colour(0xff353331),p.getX(),p.getY(),
+                                                juce::Colour(0xff0c0e10),p.getRight(),p.getBottom(),false));
+            g.fillRoundedRectangle(p,12.f);
+            g.setColour(kWarm.withAlpha(.85f));g.drawRoundedRectangle(p,12.f,1.4f);
+            drawHardwareScrew(g,p.getX()+14,p.getY()+14,4.5f);
+            drawHardwareScrew(g,p.getRight()-14,p.getY()+14,4.5f);
+            drawHardwareScrew(g,p.getX()+14,p.getBottom()-14,4.5f);
+            drawHardwareScrew(g,p.getRight()-14,p.getBottom()-14,4.5f);
+            drawGrille(g,{p.getX()+28,p.getBottom()-14,p.getWidth()-56,5},kWarm);
+        }
+        void resized() override {
+            const auto b=dialogBounds();
+            title.setBounds(b.getX()+30,b.getY()+24,b.getWidth()-60,27);
+            caption.setBounds(b.getX()+30,b.getY()+53,b.getWidth()-60,18);
+            query.setBounds(b.getX()+30,b.getY()+85,b.getWidth()-60,40);
+            results.setBounds(b.getX()+30,b.getY()+137,b.getWidth()-60,b.getHeight()-233);
+            count.setBounds(b.getX()+30,b.getBottom()-90,b.getWidth()-60,19);
+            browse.setBounds(b.getX()+30,b.getBottom()-60,170,35);
+            dismiss.setBounds(b.getRight()-213,b.getBottom()-60,82,35);
+            choose.setBounds(b.getRight()-126,b.getBottom()-60,96,35);
+        }
+        void mouseDown(const juce::MouseEvent& e) override {
+            if(!dialogBounds().contains(e.getPosition()))close();
+        }
+    private:
+        juce::Rectangle<int> dialogBounds() const {
+            const int w=juce::jmin(610,juce::jmax(420,getWidth()-60));
+            const int h=juce::jmin(620,juce::jmax(410,getHeight()-80));
+            return {(getWidth()-w)/2,(getHeight()-h)/2,w,h};
+        }
+        void filterResults(){
+            filtered.clear();
+            const auto needle=query.getText().trim();
+            for(const auto& p:candidates)
+                if(needle.isEmpty() || p.getFileNameWithoutExtension().containsIgnoreCase(needle))
+                    filtered.push_back(p);
+            results.updateContent();
+            if(!filtered.empty())results.selectRow(0);
+            count.setText(juce::String(filtered.size())+" plugin trovati ("+juce::String(candidates.size())+
+                         " installati). Doppio clic o Invio per caricare.",juce::dontSendNotification);
+            choose.setEnabled(!filtered.empty());
+        }
+        void chooseCurrent(){chooseRow(results.getSelectedRow());}
+        void chooseRow(int row){
+            if(row<0||row>=(int)filtered.size())return;
+            const int slot=activeSlot;
+            const auto file=filtered[(size_t)row];
+            auto callback=onChoose;
+            close();
+            if(callback)callback(slot,file);
+        }
+        int activeSlot=-1;
+        std::vector<juce::File> candidates,filtered;
+        std::function<void(int,const juce::File&)> onChoose;
+        std::function<void(int)> onBrowse;
+        juce::Label title,caption,count;
+        juce::TextEditor query;
+        juce::ListBox results;
+        juce::TextButton choose,browse,dismiss;
+    };
+
     class RigPanel final : public juce::Component, private juce::Timer {
         // Transparent hit-targets make the hardware-themed footswitches and
         // plugin mini-displays respond without painting opaque widgets over artwork.
@@ -753,33 +921,20 @@ private:
                 addAndMakeVisible(slider);
             }
 
-            // Install a VST3 in any slot using a dropdown, not a separate rig window.
+            // Searchable A-Z picker replaces the unreadable long ComboBox list.
+            // Every effect is loaded explicitly; the DSP and preset model are unchanged.
             pluginPaths = VstChain::installedVst3();
             for(int i=0;i<9;++i) {
                 const int index=i;
-                const juce::String title = i<4 ? "PRE " + juce::String(i+1) : (i==4 ? "SCULPT CH" : "POST " + juce::String(i-4));
-                label(slotNames[(size_t)i],title,12.f,kText);
+                const juce::String moduleTitle = i<4 ? "PRE " + juce::String(i+1) :
+                    (i==4 ? "SCULPT CH" : "POST " + juce::String(i-4));
+                label(slotNames[(size_t)i],moduleTitle,12.f,kText);
                 label(slotStatus[(size_t)i],"VUOTO",10.5f,kMuted);
-                auto& menu=slotMenus[(size_t)i];
-                menu.setTextWhenNothingSelected("Scegli VST3...");
-                menu.addItem("Scegli VST3...",1);
-                for(int p=0;p<pluginPaths.size();++p){
-                    const auto name=pluginPaths.getReference(p).getFileNameWithoutExtension();
-                    if(i==4 && !(name.toLowerCase().contains("sculpt") && name.toLowerCase().contains("chan"))) continue;
-                    pluginMap[(size_t)i].push_back(p);
-                    menu.addItem(name,(int)pluginMap[(size_t)i].size()+1);
-                }
-                menu.addSeparator();
-                menu.addItem("SFOGLIA VST3...",10000);
-                menu.onChange=[this,index] {
-                    auto& dropdown=slotMenus[(size_t)index];
-                    const int id=dropdown.getSelectedId();
-                    if(id==10000){owner.browsePluginBundle(index);return;}
-                    if(id>=2 && id-2<(int)pluginMap[(size_t)index].size())
-                        owner.loadPluginSlot(index,pluginPaths.getReference(pluginMap[(size_t)index][(size_t)(id-2)]));
-                };
-                menu.setSelectedId(1,juce::dontSendNotification);
-                addAndMakeVisible(menu);
+                auto& selector=slotMenus[(size_t)i];
+                selector.setButtonText(i==VstChain::sculptSlot?"SCULPT CHANNEL VST3":"Scegli VST3...");
+                selector.setTooltip("Digita il nome del plugin: ricerca alfabetica A-Z");
+                selector.onClick=[this,index]{showVstSearch(index);};
+                addAndMakeVisible(selector);
                 if (i != VstChain::sculptSlot) {
                     auto& foot = footswitches[(size_t)i];
                     foot.setTooltip("Footswitch: attiva / bypassa il VST3 caricato");
@@ -805,7 +960,7 @@ private:
                 }; addAndMakeVisible(on);
                 auto& clear=clearButtons[(size_t)i]; clear.setButtonText("X"); clear.onClick=[this,index]{
                     if (index == VstChain::sculptSlot) return;
-                    owner.removeVstSlot(index);slotMenus[(size_t)index].setSelectedId(1,juce::dontSendNotification); updateLabels();
+                    owner.removeVstSlot(index);updateLabels();
                 }; addAndMakeVisible(clear);
                 if(i==VstChain::sculptSlot) {on.setVisible(false); clear.setVisible(false);}
             }
@@ -827,11 +982,27 @@ private:
             variation.setButtonText("VARIATION OFF");
             variation.onClick = [this] { setSculptVariation(); };
             addAndMakeVisible(variation);
+            // Last child: visually modal within the existing application window.
+            addChildComponent(vstFinder);
+            vstFinder.setVisible(false);
             setSize(1580,860);
             startTimerHz(6);
             updateLabels();
         }
         ~RigPanel() override {stopTimer();}
+
+        void showVstSearch(int slot){
+            // Re-enumerate: an installed VST3 may have been added since app launch.
+            pluginPaths=VstChain::installedVst3();
+            vstFinder.setBounds(getLocalBounds());
+            vstFinder.open(slot,pluginPaths,
+                [safe=juce::Component::SafePointer<RigPanel>(this)](int index,const juce::File& file){
+                    if(safe!=nullptr){safe->owner.loadPluginSlot(index,file);safe->updateLabels();}
+                },
+                [safe=juce::Component::SafePointer<RigPanel>(this)](int index){
+                    if(safe!=nullptr)safe->owner.browsePluginBundle(index);
+                });
+        }
 
         void setPluginSnapshot(int slot, const juce::Image& image) {
             if (slot<0 || slot>=9 || slot==VstChain::sculptSlot || !image.isValid())return;
@@ -859,6 +1030,11 @@ private:
             g.fillRoundedRectangle(juce::Rectangle<float>(19.f,14.f,4.f,44.f),2.f);
             g.setColour(kWarm.withAlpha(.32f));
             g.drawLine(102.f,64.f,430.f,64.f,.8f);
+            // Standalone titlebar engine indicator, as in the approved visual reference.
+            const float ledX=(float)getWidth()-39.f;
+            g.setColour(kGreen.withAlpha(.18f));g.fillEllipse(ledX-7.f,21.f,14.f,14.f);
+            g.setColour(kGreen);g.fillEllipse(ledX-3.5f,24.5f,7.f,7.f);
+
             g.setColour(juce::Colours::black.withAlpha(.72f));
             g.drawLine(0,74.f,(float)getWidth(),74.f,2.f);
 
@@ -877,6 +1053,11 @@ private:
                 g.drawRoundedRectangle(r.reduced(0.6f),10.f,1.2f);
                 g.setColour(kWarm.withAlpha(.50f));
                 g.drawLine(r.getX()+20.f,r.getY()+1.5f,r.getRight()-20.f,r.getY()+1.5f,1.2f);
+                g.setColour(juce::Colours::white.withAlpha(.023f));
+                for(int yy=8;yy<(int)r.getHeight()-10;yy+=5)
+                    g.drawLine(r.getX()+6.f,r.getY()+yy,r.getRight()-6.f,r.getY()+yy,.55f);
+                g.setColour(juce::Colours::black.withAlpha(.36f));
+                g.drawRoundedRectangle(r.reduced(4.f),8.f,.8f);
                 g.setColour(kWarm);
                 g.setFont(juce::Font(juce::FontOptions(20.f,juce::Font::bold)));
                 g.drawText(juce::String(i+1)+".",r.getX()+14.f,r.getY()+12.f,28.f,29.f,juce::Justification::centredLeft);
@@ -976,13 +1157,14 @@ private:
             g.setColour(kGreen);g.fillEllipse(sculpt.getX()+19.f,sculpt.getY()+116.f,8.f,8.f);
 
             // A real cabinet photograph/illustration borrowed from the approved concept.
-            static const juce::Image art=juce::ImageCache::getFromMemory(BinaryData::RigArtwork_png,
-                                                                  BinaryData::RigArtwork_pngSize);
-            if(art.isValid()){
+            // Single compact image atlas: photo-real decorative hardware details.
+            static const juce::Image skinAtlas=juce::ImageCache::getFromMemory(
+                BinaryData::SkinAtlas_png,BinaryData::SkinAtlas_pngSize);
+            if(skinAtlas.isValid()){
                 const auto cabR=juce::Rectangle<float>((float)nam.getX()+18.f,(float)nam.getY()+331.f,
                                                        (float)nam.getWidth()-36.f,158.f);
-                g.drawImage(art,(int)cabR.getX(),(int)cabR.getY(),(int)cabR.getWidth(),
-                            (int)cabR.getHeight(),0,180,235,180);
+                g.drawImage(skinAtlas,(int)cabR.getX(),(int)cabR.getY(),(int)cabR.getWidth(),
+                            (int)cabR.getHeight(),0,360,330,180);
                 g.setColour(kWarm.withAlpha(.45f));g.drawRoundedRectangle(cabR,5.f,1.f);
             }
             // Neutral pedal shells frame the *real* VST3 selectors, editor and bypass.
@@ -996,7 +1178,13 @@ private:
                 g.setGradientFill(juce::ColourGradient(color.darker(.20f),r.getX(),r.getY(),
                                       juce::Colour(0xff151616),r.getRight(),r.getBottom(),false));
                 g.fillRoundedRectangle(r,8.f);
-                g.setColour(color.withAlpha(.85f));g.drawRoundedRectangle(r.reduced(1.f),8.f,1.5f);
+                // Real steel edges sampled from the approved reference; transparent centres
+                // keep the actual plugin state and rack previews dynamic.
+                if(skinAtlas.isValid()){
+                    g.drawImage(skinAtlas,(int)r.getX(),(int)r.getY(),(int)r.getWidth(),(int)r.getHeight(),
+                                (ix%4)*330,(ix/4)*180,330,180);
+                }
+                g.setColour(color.withAlpha(.75f));g.drawRoundedRectangle(r.reduced(1.f),8.f,1.3f);
                 // A genuine static editor snapshot is shown after the user closes EDIT.
                 // Until then, a plugin-labelled rack faceplate is drawn for loaded VST3s.
                 // If the slot is empty, draw a sealed brushed-metal blank plate.
@@ -1053,8 +1241,13 @@ private:
                 g.drawEllipse(r.getX()+11.5f,r.getY()+43.5f,12.f,12.f,1.6f);
                 for(float xx:{r.getX()+7.f,r.getRight()-7.f})
                     for(float yy:{r.getY()+7.f,r.getBottom()-7.f})drawHardwareScrew(g,xx,yy,3.2f);
-                g.setColour(juce::Colours::white.withAlpha(.10f));
-                g.drawLine(r.getX()+15.f,r.getY()+3.f,r.getRight()-15.f,r.getY()+3.f,.7f);
+                g.setColour(juce::Colours::white.withAlpha(.22f));
+                g.drawLine(r.getX()+15.f,r.getY()+3.f,r.getRight()-15.f,r.getY()+3.f,1.f);
+                // Extra hardware highlights: amber power aura and lower rack edging.
+                g.setColour(enabled ? color.brighter(.35f).withAlpha(.16f) : juce::Colours::black.withAlpha(.14f));
+                g.drawRoundedRectangle(r.expanded(1.5f),8.f,2.3f);
+                g.setColour(juce::Colours::black.withAlpha(.48f));
+                g.drawLine(r.getX()+12.f,r.getBottom()-33.f,r.getRight()-12.f,r.getBottom()-33.f,1.f);
             }
             // Visual arrows mark processing direction; ordering is the actual engine order.
             for(int i=0;i<5;++i){
@@ -1133,12 +1326,16 @@ private:
             const int knobW=(sculpt.getWidth()-14)/2;
             for(int k=0;k<5;++k){
                 const int col=k%2,row=k/2;
-                const int kx=sculpt.getX()+col*(knobW+12),ky=y+271+row*128;
+                const int kx=k==4?sculpt.getCentreX()-knobW/2:
+                             sculpt.getX()+col*(knobW+12);
+                const int ky=y+271+row*128;
                 knobLabels[(size_t)k].setBounds(kx,ky,knobW,20);
                 knobs[(size_t)k].setBounds(kx+3,ky+24,knobW-6,77);
                 knobValues[(size_t)k].setBounds(kx,ky+102,knobW,20);
             }
             variation.setBounds(sculpt.getX(),y+662,sculpt.getWidth(),37);
+            vstFinder.setBounds(getLocalBounds());
+            if(vstFinder.isVisible())vstFinder.toFront(true);
         }
     private:
         // The delete menu is separate from the load menu. Choosing an item here NEVER recalls it.
@@ -1193,9 +1390,14 @@ private:
             const int x=r.getX()+10,y=r.getY()+7,w=r.getWidth()-20;
             if(index == VstChain::sculptSlot){
                 slotNames[(size_t)index].setBounds(0,0,0,0);
-                slotMenus[(size_t)index].setBounds(x,y+2,w,32);
+                // The fixed Sculpt module uses only a small load control when missing;
+                // no duplicate slot selector is drawn over its front plate.
+                const bool missing=owner.vstChain.get(index)==nullptr;
+                slotMenus[(size_t)index].setBounds(x,y+2,w,missing?28:0);
+                slotMenus[(size_t)index].setVisible(missing);
                 slotStatus[(size_t)index].setBounds(0,0,0,0);
-                editors[(size_t)index].setBounds(x,y+43,w,28);
+                editors[(size_t)index].setBounds(x,y+43,w,25);
+                editors[(size_t)index].setVisible(!missing);
                 power[(size_t)index].setBounds(0,0,0,0);
                 clearButtons[(size_t)index].setBounds(0,0,0,0);
                 footswitches[(size_t)index].setBounds(0,0,0,0);
@@ -1330,21 +1532,24 @@ private:
                     previewIds[(size_t)i]=newId;
                 }
                 slotStatus[(size_t)i].setText(name.isNotEmpty()?name:"",juce::dontSendNotification);
-                // Reflect plugins recalled from disk in the visible drop-down too.
-                int selectedMenuId=1;
-                const auto bundle=owner.vstChain.bundlePath(i);
-                for(int j=0;j<(int)pluginMap[(size_t)i].size();++j){
-                    const auto path=pluginPaths.getReference(pluginMap[(size_t)i][(size_t)j]);
-                    if(path==bundle && bundle.exists()) {selectedMenuId=j+2;break;}
-                }
-                if(slotMenus[(size_t)i].getSelectedId()!=selectedMenuId)
-                    slotMenus[(size_t)i].setSelectedId(selectedMenuId,juce::dontSendNotification);
+                // The selector always shows the real loaded plugin (or the empty state).
+                const auto selectorText=name.isNotEmpty()?name:
+                    (i==VstChain::sculptSlot?"CARICA SCULPT CH...":"Scegli VST3...");
+                if(slotMenus[(size_t)i].getButtonText()!=selectorText)
+                    slotMenus[(size_t)i].setButtonText(selectorText);
                 editors[(size_t)i].setEnabled(name.isNotEmpty());
                 power[(size_t)i].setEnabled(i != VstChain::sculptSlot && name.isNotEmpty());
                 clearButtons[(size_t)i].setEnabled(i != VstChain::sculptSlot && name.isNotEmpty());
-                power[(size_t)i].setButtonText(owner.vstChain.enabled(i)?"ON":"BYPASS");
+                power[(size_t)i].setButtonText("BYPASS");
+                power[(size_t)i].setTooltip(owner.vstChain.enabled(i)?
+                    "Effetto attivo. Clicca per bypassare.":"Effetto bypassato. Clicca per riattivare.");
                 power[(size_t)i].setToggleState(owner.vstChain.enabled(i),juce::dontSendNotification);
-                if (i == VstChain::sculptSlot) {power[(size_t)i].setVisible(false);clearButtons[(size_t)i].setVisible(false);}
+                if (i == VstChain::sculptSlot) {
+                    power[(size_t)i].setVisible(false);clearButtons[(size_t)i].setVisible(false);
+                    const bool missing=name.isEmpty();
+                    slotMenus[(size_t)i].setVisible(missing);
+                    editors[(size_t)i].setVisible(!missing);
+                }
             }
             updatingKnobs=true;
             for(int k=0;k<5;++k){
@@ -1366,6 +1571,7 @@ private:
         }
         GuitarRigWindow& owner;
         juce::Array<juce::File> pluginPaths;
+        VstPickerOverlay vstFinder;
         juce::Label presetHeading,namInputHeading,namOutputHeading;
         juce::ComboBox presetPicker;
         juce::TextEditor presetNameEditor;
@@ -1373,7 +1579,6 @@ private:
         juce::StringArray presetCatalog;
         juce::String lastLoadedName;
         std::array<juce::Slider,2> namGains;
-        std::array<std::vector<int>,9> pluginMap;
         std::array<juce::Rectangle<int>,6> sections;
         std::array<juce::Rectangle<int>,9> slotRects;
         std::array<juce::Image,9> pluginSnapshots;
@@ -1395,7 +1600,7 @@ private:
         juce::Slider gateThreshold,masterSlider;
         juce::ComboBox namPicker;
         std::array<juce::Label,9> slotNames,slotStatus;
-        std::array<juce::ComboBox,9> slotMenus;
+        std::array<juce::TextButton,9> slotMenus;
         std::array<juce::TextButton,9> editors,power,clearButtons;
         std::array<InvisibleButton,9> footswitches,previewButtons;
         std::array<juce::Slider,5> knobs;
@@ -1438,22 +1643,7 @@ private:
     }
 
     void showPluginMenu(int slot) {
-        juce::PopupMenu menu;
-        const auto paths=VstChain::installedVst3();
-        for(int i=0;i<paths.size();++i) {
-            const auto& file=paths.getReference(i);
-            if(slot==VstChain::sculptSlot && !file.getFileNameWithoutExtension().toLowerCase().contains("sculpt")) continue;
-            menu.addItem(i+1,file.getFileNameWithoutExtension());
-        }
-        if (paths.isEmpty()) menu.addItem(99998,"Nessun plugin VST3 trovato",false);
-        menu.addSeparator();
-        menu.addItem(99999,"SCEGLI UN FILE .VST3... ");
-        menu.showMenuAsync(juce::PopupMenu::Options(),
-            [safe=juce::Component::SafePointer<GuitarRigWindow>(this),slot,paths](int id) {
-                if (safe==nullptr || id==0) return;
-                if(id==99999) safe->browsePluginBundle(slot);
-                else if(id>=1 && id<=paths.size()) safe->loadPluginSlot(slot,paths.getReference(id-1));
-            });
+        if(rigPanel!=nullptr) rigPanel->showVstSearch(slot);
     }
 
     void browsePluginBundle(int slot) {
@@ -2026,7 +2216,7 @@ public:
 class SculptApp final : public juce::JUCEApplication {
 public:
     const juce::String getApplicationName() override { return "Sculpt Guitar Rig"; }
-    const juce::String getApplicationVersion() override { return "1.3.4-beta-preview"; }
+    const juce::String getApplicationVersion() override { return "1.3.6-beta-search"; }
     bool moreThanOneInstanceAllowed() override { return false; }
     void initialise(const juce::String&) override {
         mainWindow = std::make_unique<SculptMainWindow>();
