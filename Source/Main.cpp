@@ -1205,6 +1205,12 @@ private:
             // Single compact image atlas: photo-real decorative hardware details.
             static const juce::Image skinAtlas=juce::ImageCache::getFromMemory(
                 BinaryData::SkinAtlas_png,BinaryData::SkinAtlas_pngSize);
+            static const juce::Image slotEmptyArt=juce::ImageCache::getFromMemory(
+                BinaryData::SlotEmpty_png,BinaryData::SlotEmpty_pngSize);
+            static const juce::Image slotFilledArt=juce::ImageCache::getFromMemory(
+                BinaryData::SlotFilled_png,BinaryData::SlotFilled_pngSize);
+            static const juce::Image slotBypassedArt=juce::ImageCache::getFromMemory(
+                BinaryData::SlotBypassed_png,BinaryData::SlotBypassed_pngSize);
             if(skinAtlas.isValid()){
                 const auto cabR=juce::Rectangle<float>((float)nam.getX()+18.f,(float)nam.getY()+476.f,
                                                        (float)nam.getWidth()-36.f,180.f);
@@ -1239,8 +1245,6 @@ private:
                 g.setColour(juce::Colours::black.withAlpha(.40f));
                 g.drawRoundedRectangle(shell.reduced(4.f),4.f,.65f);
 
-                // A subdued glass display, not a generated image of a nonexistent plugin.
-                // A genuine editor snapshot, if captured, is letterboxed with original ratio.
                 const auto rack=juce::Rectangle<float>(r.getX()+67.f,r.getY()+49.f,
                                                        r.getWidth()-81.f,r.getHeight()-61.f);
                 g.setColour(juce::Colours::black.withAlpha(.70f));
@@ -1248,38 +1252,38 @@ private:
                 g.setGradientFill(juce::ColourGradient(juce::Colour(0xff111517),rack.getX(),rack.getY(),
                                                 juce::Colour(0xff080a0c),rack.getRight(),rack.getBottom(),false));
                 g.fillRoundedRectangle(rack,3.f);
-                if(loaded && pluginSnapshots[(size_t)i].isValid()){
+                // Slot imagery is now explicit and consistent:
+                // empty slot = cap panel, loaded = standard module, bypassed = dimmed module.
+                const auto artBounds=rack.reduced(3.f);
+                const juce::Image* slotArt=nullptr;
+                if(!loaded) slotArt=&slotEmptyArt;
+                else if(!enabled) slotArt=&slotBypassedArt;
+                else slotArt=&slotFilledArt;
+
+                auto drawCover=[&](const juce::Image& img){
+                    if(!img.isValid()) return;
+                    const float scale=juce::jmin(artBounds.getWidth()/img.getWidth(),
+                                                 artBounds.getHeight()/img.getHeight());
+                    const int dw=juce::jmax(1,(int)std::round(img.getWidth()*scale));
+                    const int dh=juce::jmax(1,(int)std::round(img.getHeight()*scale));
+                    const int dx=(int)std::round(artBounds.getCentreX()-dw*0.5f);
+                    const int dy=(int)std::round(artBounds.getCentreY()-dh*0.5f);
+                    g.drawImage(img,dx,dy,dw,dh,0,0,img.getWidth(),img.getHeight());
+                };
+                if(slotArt!=nullptr) drawCover(*slotArt);
+
+                // Optional real snapshot can still replace the default art when available and enabled.
+                if(loaded && enabled && pluginSnapshots[(size_t)i].isValid()){
+                    g.setColour(juce::Colours::black.withAlpha(.42f));
+                    g.fillRoundedRectangle(artBounds,3.f);
                     const auto& snapshot=pluginSnapshots[(size_t)i];
-                    const float scale=juce::jmin((rack.getWidth()-10.f)/snapshot.getWidth(),
-                                                  (rack.getHeight()-10.f)/snapshot.getHeight());
+                    const float scale=juce::jmin((artBounds.getWidth()-10.f)/snapshot.getWidth(),
+                                                 (artBounds.getHeight()-10.f)/snapshot.getHeight());
                     const int dw=juce::jmax(1,(int)std::round(snapshot.getWidth()*scale));
                     const int dh=juce::jmax(1,(int)std::round(snapshot.getHeight()*scale));
-                    g.drawImage(snapshot,(int)(rack.getCentreX()-dw*.5f),
-                                (int)(rack.getCentreY()-dh*.5f),dw,dh,
+                    g.drawImage(snapshot,(int)(artBounds.getCentreX()-dw*.5f),
+                                (int)(artBounds.getCentreY()-dh*.5f),dw,dh,
                                 0,0,snapshot.getWidth(),snapshot.getHeight());
-                }else if(loaded){
-                    const auto margin=juce::jmin(14.f,rack.getHeight()*.18f);
-                    g.setColour(colour.brighter(.55f).withAlpha(.64f));
-                    g.fillRoundedRectangle(juce::Rectangle<float>(rack.getX()+8.f,rack.getY()+margin,
-                                      3.f,rack.getHeight()-2.f*margin),1.5f);
-                    g.setColour(kText);
-                    g.setFont(juce::Font(juce::FontOptions(13.f,juce::Font::bold)));
-                    g.drawFittedText(owner.vstChain.name(i),
-                         juce::Rectangle<int>((int)rack.getX()+18,(int)rack.getY()+7,
-                                              (int)rack.getWidth()-27,(int)rack.getHeight()-24),
-                         juce::Justification::centred,2,.75f);
-                    g.setColour(kMuted.withAlpha(.72f));
-                    g.setFont(juce::Font(juce::FontOptions(9.f)));
-                    g.drawFittedText("VST3  /  CLICCA PER APRIRE",
-                         juce::Rectangle<int>((int)rack.getX()+12,(int)rack.getBottom()-20,
-                                              (int)rack.getWidth()-24,14),
-                         juce::Justification::centred,1,.7f);
-                }else{
-                    drawGrille(g,rack.reduced(9.f,12.f),colour);
-                    g.setColour(juce::Colour(0xffadb5b5).withAlpha(.68f));
-                    g.setFont(juce::Font(juce::FontOptions(10.2f,juce::Font::bold)));
-                    g.drawFittedText("SLOT LIBERO",rack.toNearestInt().reduced(9,5),
-                                     juce::Justification::centred,1,.8f);
                 }
                 g.setColour(juce::Colour(0xff93918b).withAlpha(.75f));
                 g.drawRoundedRectangle(rack.reduced(.5f),3.f,1.f);
