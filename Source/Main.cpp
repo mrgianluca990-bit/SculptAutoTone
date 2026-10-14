@@ -100,32 +100,65 @@ public:
     }
     void drawRotarySlider(juce::Graphics& g,int x,int y,int w,int h,float pos,
                           float start,float end,juce::Slider& slider) override {
-        const float size=juce::jmin((float)w,(float)h)*0.78f;
-        const float cx=(float)x+w*0.5f,cy=(float)y+h*0.50f,r=size*0.5f;
-        g.setColour(juce::Colours::black.withAlpha(0.58f));
-        g.fillEllipse(cx-r-3.f,cy-r-1.f,size+6.f,size+6.f);
-        juce::Path arc;arc.addCentredArc(cx,cy,r+5.f,r+5.f,0.f,start,start+(end-start)*pos,true);
-        g.setColour(slider.isEnabled()?kAccent:kMuted);
-        g.strokePath(arc,juce::PathStrokeType(3.4f,juce::PathStrokeType::curved,juce::PathStrokeType::rounded));
-        for(int t=0;t<=10;++t){
-            const float a=start+(end-start)*(float)t/10.f;
-            g.setColour(kWarm.withAlpha(t%5==0?.66f:.28f));
-            g.drawLine(cx+std::sin(a)*(r+8.f),cy-std::cos(a)*(r+8.f),
-                       cx+std::sin(a)*(r+11.f),cy-std::cos(a)*(r+11.f),t%5==0?1.4f:.8f);
+        juce::Graphics::ScopedSaveState saved(g);
+        const float diam=juce::jmax(24.f,juce::jmin((float)w,(float)h)*0.70f);
+        const float cx=(float)x+(float)w*.5f,cy=(float)y+(float)h*.49f;
+        const float r=diam*.5f;
+        const float valueAngle=start+(end-start)*juce::jlimit(0.f,1.f,pos);
+        const bool enabled=slider.isEnabled();
+        const juce::Colour accent=enabled?kAccent:juce::Colour(0xff575b5b);
+        // Two concentric machined rings, lit segments and individually spaced graduations.
+        g.setColour(juce::Colours::black.withAlpha(.55f));
+        g.fillEllipse(cx-r-8.f,cy-r-6.f,diam+16.f,diam+16.f);
+        g.setGradientFill(juce::ColourGradient(juce::Colour(0xffbeb6a6),cx-r,cy-r,
+                                                juce::Colour(0xff242525),cx+r,cy+r,false));
+        g.fillEllipse(cx-r-4.f,cy-r-4.f,diam+8.f,diam+8.f);
+        g.setColour(juce::Colour(0xff0d0d0e));
+        g.fillEllipse(cx-r+1.f,cy-r+1.f,diam-2.f,diam-2.f);
+        juce::Path track;
+        track.addCentredArc(cx,cy,r+8.f,r+8.f,0.f,start,end,true);
+        g.setColour(juce::Colour(0xff57514c).withAlpha(.70f));
+        g.strokePath(track,juce::PathStrokeType(2.8f));
+        juce::Path progress;
+        progress.addCentredArc(cx,cy,r+8.f,r+8.f,0.f,start,valueAngle,true);
+        g.setColour(accent.withAlpha(.96f));
+        g.strokePath(progress,juce::PathStrokeType(3.3f,juce::PathStrokeType::curved,
+                                                   juce::PathStrokeType::rounded));
+        for(int t=0;t<=16;++t){
+            const float angle=start+(end-start)*(float)t/16.f;
+            const float rr=r+14.f;
+            g.setColour(enabled ? (t%4==0?kWarm.withAlpha(.92f):kWarm.withAlpha(.49f))
+                                :kMuted.withAlpha(.28f));
+            const float inner=rr-(t%4==0?5.f:3.f);
+            g.drawLine(cx+std::sin(angle)*inner,cy-std::cos(angle)*inner,
+                       cx+std::sin(angle)*rr,cy-std::cos(angle)*rr,
+                       t%4==0?1.45f:.85f);
         }
-        g.setGradientFill(juce::ColourGradient(juce::Colour(0xff90928e),cx-r,cy-r,
-                                               juce::Colour(0xff15191a),cx+r,cy+r,false));
-        g.fillEllipse(cx-r,cy-r,size,size);
-        g.setColour(juce::Colour(0xff101213));g.drawEllipse(cx-r+1,cy-r+1,size-2,size-2,1.6f);
-        g.setGradientFill(juce::ColourGradient(juce::Colour(0xff535655),cx-r/2,cy-r,
-                                               juce::Colour(0xff141618),cx+r/2,cy+r,false));
-        g.fillEllipse(cx-r+5.f,cy-r+5.f,size-10.f,size-10.f);
-        const float a=start+(end-start)*pos;
-        const float len=r*.67f;
-        g.setColour(kText);
-        g.drawLine(cx+std::sin(a)*r*.22f,cy-std::cos(a)*r*.22f,
-                   cx+std::sin(a)*len,cy-std::cos(a)*len,2.8f);
-        g.setColour(juce::Colours::white.withAlpha(0.07f));g.drawEllipse(cx-r+6.f,cy-r+6.f,size-12.f,size-12.f,.7f);
+        // Physical knurl, satin machined skirt and brushed charcoal face.
+        g.setGradientFill(juce::ColourGradient(juce::Colour(0xff91918d),cx-r,cy-r,
+                                               juce::Colour(0xff191b1d),cx+r,cy+r,false));
+        g.fillEllipse(cx-r,cy-r,diam,diam);
+        g.setColour(juce::Colour(0xffd5cabe).withAlpha(.42f));
+        g.drawEllipse(cx-r+1.f,cy-r+1.f,diam-2.f,diam-2.f,1.f);
+        g.setGradientFill(juce::ColourGradient(juce::Colour(0xff636563),cx-r*.66f,cy-r*.72f,
+                                               juce::Colour(0xff101315),cx+r*.7f,cy+r*.8f,false));
+        const float faceR=r*.81f;
+        g.fillEllipse(cx-faceR,cy-faceR,2.f*faceR,2.f*faceR);
+        g.setColour(juce::Colour(0xffc7c1b4).withAlpha(.13f));
+        for(int ring=1;ring<=3;++ring){
+            const float rr=faceR-(float)ring*2.f;
+            if(rr>2)g.drawEllipse(cx-rr,cy-rr,2*rr,2*rr,.45f);
+        }
+        // Illuminated white/amber position index recessed into the knob face.
+        const float tip=faceR*.89f,base=faceR*.48f;
+        g.setColour(juce::Colours::black.withAlpha(.75f));
+        g.drawLine(cx+std::sin(valueAngle)*base+1.f,cy-std::cos(valueAngle)*base+1.f,
+                   cx+std::sin(valueAngle)*tip+1.f,cy-std::cos(valueAngle)*tip+1.f,4.f);
+        g.setColour(enabled?juce::Colour(0xffffe5bc):kMuted);
+        g.drawLine(cx+std::sin(valueAngle)*base,cy-std::cos(valueAngle)*base,
+                   cx+std::sin(valueAngle)*tip,cy-std::cos(valueAngle)*tip,2.7f);
+        g.setColour(juce::Colours::white.withAlpha(.14f));
+        g.drawEllipse(cx-faceR,cy-faceR,faceR*2,faceR*2,.75f);
     }
     void drawLinearSlider(juce::Graphics& g,int x,int y,int w,int h,float sliderPos,
                           float,float,juce::Slider::SliderStyle style,juce::Slider&) override {
@@ -905,12 +938,13 @@ private:
             loadIr.setButtonText("CARICA IR..."); loadIr.onClick=[this]{owner.chooseIR();}; addAndMakeVisible(loadIr);
             prevNam.setButtonText("<"); prevNam.onClick=[this]{owner.changeNam(-1);}; addAndMakeVisible(prevNam);
             nextNam.setButtonText(">"); nextNam.onClick=[this]{owner.changeNam(1);}; addAndMakeVisible(nextNam);
-            label(namInputHeading,"NAM INPUT / dB",11.f,kWarm);
-            label(namOutputHeading,"NAM OUTPUT / dB",11.f,kWarm);
+            label(namInputHeading,"NAM INPUT",11.f,kWarm);
+            label(namOutputHeading,"NAM OUTPUT",11.f,kWarm);
             for(int i=0;i<2;++i){
                 auto& slider=namGains[(size_t)i];
-                slider.setSliderStyle(juce::Slider::LinearHorizontal);
-                slider.setTextBoxStyle(juce::Slider::TextBoxRight,false,53,23);
+                slider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+                slider.setTextBoxStyle(juce::Slider::TextBoxBelow,false,64,21);
+                slider.setDoubleClickReturnValue(true,0.0);
                 slider.setRange(-12.,12.,.5);
                 slider.setTextValueSuffix(" dB");
                 slider.setValue(0.,juce::dontSendNotification);
@@ -949,20 +983,15 @@ private:
                     preview.setTooltip("Anteprima rack: clicca per aprire l'editor VST3 (o caricare un plugin)");
                     preview.onClick=[this,index]{
                         if(owner.vstChain.get(index)!=nullptr)owner.openPluginEditor(index);
-                        else owner.showPluginMenu(index);
+                        else showVstSearch(index);
                     };
                     addAndMakeVisible(preview);
                 }
-                auto& edit=editors[(size_t)i]; edit.setButtonText("EDIT"); edit.onClick=[this,index]{owner.openPluginEditor(index);}; addAndMakeVisible(edit);
-                auto& on=power[(size_t)i]; on.setButtonText("ON/OFF"); on.onClick=[this,index]{
-                    if (index == VstChain::sculptSlot) return;
-                    owner.vstChain.enable(index,!owner.vstChain.enabled(index)); updateLabels();
-                }; addAndMakeVisible(on);
                 auto& clear=clearButtons[(size_t)i]; clear.setButtonText("X"); clear.onClick=[this,index]{
                     if (index == VstChain::sculptSlot) return;
                     owner.removeVstSlot(index);updateLabels();
                 }; addAndMakeVisible(clear);
-                if(i==VstChain::sculptSlot) {on.setVisible(false); clear.setVisible(false);}
+                if(i==VstChain::sculptSlot) clear.setVisible(false);
             }
             const char* names[]={"Low","Mid","High","Presence","Output"};
             for(int k=0;k<5;++k){
@@ -979,6 +1008,13 @@ private:
                 label(knobValues[(size_t)k],"-",10.5f,kText);
                 knobValues[(size_t)k].setJustificationType(juce::Justification::centred);
             }
+            sculptFaceButton.setTooltip("Apri l'editor Sculpt Channel. Se assente, cerca il VST3.");
+            sculptFaceButton.onClick=[this]{
+                if(owner.vstChain.get(VstChain::sculptSlot)!=nullptr)
+                    owner.openPluginEditor(VstChain::sculptSlot);
+                else showVstSearch(VstChain::sculptSlot);
+            };
+            addAndMakeVisible(sculptFaceButton);
             variation.setButtonText("VARIATION OFF");
             variation.onClick = [this] { setSculptVariation(); };
             addAndMakeVisible(variation);
@@ -1142,18 +1178,27 @@ private:
                 for(float xx:{sculpt.getX()+20.f,sculpt.getRight()-20.f})drawHardwareScrew(g,xx,yy,5.f);
             drawGrille(g,juce::Rectangle<float>((float)sculpt.getX()+20.f,(float)sculpt.getY()+231.f,
                                      (float)sculpt.getWidth()-40.f,7.f),kWarm);
-            // Studio channel processor texture / module label.
-            auto proc=juce::Rectangle<float>((float)sculpt.getX()+14.f,(float)sculpt.getY()+169.f,
-                                (float)sculpt.getWidth()-28.f,57.f);
-            g.setGradientFill(juce::ColourGradient(juce::Colour(0xff45413a),proc.getX(),proc.getY(),
-                                                  juce::Colour(0xff0b0b0c),proc.getX(),proc.getBottom(),false));
-            g.fillRoundedRectangle(proc,6.f);
-            g.setColour(juce::Colour(0xff747270));g.drawRoundedRectangle(proc,6.f,1.2f);
-            g.setColour(kText);g.setFont(juce::Font(juce::FontOptions(16.f,juce::Font::bold)));
-            g.drawFittedText("SCULPT CHANNEL",proc.toNearestInt().reduced(5,3),juce::Justification::centred,1,.85f);
-            g.setColour(kMuted);g.setFont(juce::Font(juce::FontOptions(8.2f)));
-            g.drawText("TONE   /   DYNAMICS   /   CHARACTER",(int)proc.getX(),(int)proc.getBottom()-20,
-                       (int)proc.getWidth(),13,juce::Justification::centred);
+            // The faceplate is the editor button: engraved typography, no EDIT control.
+            const auto proc=juce::Rectangle<float>((float)sculpt.getX()+14.f,(float)sculpt.getY()+169.f,
+                                                    (float)sculpt.getWidth()-28.f,57.f);
+            g.setColour(juce::Colours::black.withAlpha(.62f));
+            g.fillRoundedRectangle(proc.expanded(1.5f),5.f);
+            g.setGradientFill(juce::ColourGradient(juce::Colour(0xff4f4a41),proc.getX(),proc.getY(),
+                                                  juce::Colour(0xff131619),proc.getRight(),proc.getBottom(),false));
+            g.fillRoundedRectangle(proc,4.f);
+            g.setColour(juce::Colour(0xffafa18a).withAlpha(.65f));
+            g.drawRoundedRectangle(proc.reduced(.6f),4.f,1.f);
+            g.setColour(juce::Colour(0xfff3d19f));
+            g.setFont(juce::Font(juce::FontOptions(18.2f,juce::Font::bold)));
+            g.drawFittedText("SCULPT",juce::Rectangle<int>((int)proc.getX()+14,(int)proc.getY()+5,
+                             (int)proc.getWidth()-28,24),juce::Justification::centred,1,.9f);
+            g.setColour(kText.withAlpha(.82f));
+            g.setFont(juce::Font(juce::FontOptions(9.2f,juce::Font::bold)));
+            g.drawFittedText("C H A N N E L",juce::Rectangle<int>((int)proc.getX()+11,
+                             (int)proc.getY()+31,(int)proc.getWidth()-22,17),
+                             juce::Justification::centred,1,.85f);
+            drawHardwareScrew(g,proc.getX()+8.f,proc.getCentreY(),3.f);
+            drawHardwareScrew(g,proc.getRight()-8.f,proc.getCentreY(),3.f);
             g.setColour(kGreen);g.fillEllipse(sculpt.getX()+19.f,sculpt.getY()+116.f,8.f,8.f);
 
             // A real cabinet photograph/illustration borrowed from the approved concept.
@@ -1161,93 +1206,99 @@ private:
             static const juce::Image skinAtlas=juce::ImageCache::getFromMemory(
                 BinaryData::SkinAtlas_png,BinaryData::SkinAtlas_pngSize);
             if(skinAtlas.isValid()){
-                const auto cabR=juce::Rectangle<float>((float)nam.getX()+18.f,(float)nam.getY()+331.f,
-                                                       (float)nam.getWidth()-36.f,158.f);
+                const auto cabR=juce::Rectangle<float>((float)nam.getX()+18.f,(float)nam.getY()+476.f,
+                                                       (float)nam.getWidth()-36.f,180.f);
                 g.drawImage(skinAtlas,(int)cabR.getX(),(int)cabR.getY(),(int)cabR.getWidth(),
                             (int)cabR.getHeight(),0,360,330,180);
-                g.setColour(kWarm.withAlpha(.45f));g.drawRoundedRectangle(cabR,5.f,1.f);
+                g.setColour(kWarm.withAlpha(.50f));g.drawRoundedRectangle(cabR.reduced(.5f),5.f,1.1f);
+                drawHardwareScrew(g,cabR.getX()+7.f,cabR.getY()+7.f,3.f);
+                drawHardwareScrew(g,cabR.getRight()-7.f,cabR.getY()+7.f,3.f);
+                drawHardwareScrew(g,cabR.getX()+7.f,cabR.getBottom()-7.f,3.f);
+                drawHardwareScrew(g,cabR.getRight()-7.f,cabR.getBottom()-7.f,3.f);
             }
-            // Neutral pedal shells frame the *real* VST3 selectors, editor and bypass.
+            // Precision pedal chassis. No baked-in controls: empty and occupied states
+            // share the same frame, while the real VST3 editor snapshot is optional.
             for(int i=0;i<9;++i){
-                if(i==4)continue;
-                const auto r=slotRects[(size_t)i].toFloat();if(r.isEmpty())continue;
+                if(i==VstChain::sculptSlot)continue;
+                const auto r=slotRects[(size_t)i].toFloat();
+                if(r.isEmpty())continue;
                 const int ix=i<4?i:i-1;
-                const auto color=kPedalColours[(size_t)ix];
+                const auto colour=kPedalColours[(size_t)ix];
                 const bool loaded=owner.vstChain.get(i)!=nullptr;
                 const bool enabled=loaded && owner.vstChain.enabled(i);
-                g.setGradientFill(juce::ColourGradient(color.darker(.20f),r.getX(),r.getY(),
-                                      juce::Colour(0xff151616),r.getRight(),r.getBottom(),false));
-                g.fillRoundedRectangle(r,8.f);
-                // Real steel edges sampled from the approved reference; transparent centres
-                // keep the actual plugin state and rack previews dynamic.
-                if(skinAtlas.isValid()){
-                    g.drawImage(skinAtlas,(int)r.getX(),(int)r.getY(),(int)r.getWidth(),(int)r.getHeight(),
-                                (ix%4)*330,(ix/4)*180,330,180);
-                }
-                g.setColour(color.withAlpha(.75f));g.drawRoundedRectangle(r.reduced(1.f),8.f,1.3f);
-                // A genuine static editor snapshot is shown after the user closes EDIT.
-                // Until then, a plugin-labelled rack faceplate is drawn for loaded VST3s.
-                // If the slot is empty, draw a sealed brushed-metal blank plate.
-                const auto rack=juce::Rectangle<float>(r.getX()+66.f,r.getY()+52.f,
-                                                       r.getWidth()-78.f,61.f);
-                g.setColour(juce::Colour(0xff080b0d));g.fillRoundedRectangle(rack.expanded(2.f),4.f);
-                if (loaded && pluginSnapshots[(size_t)i].isValid()) {
+                const auto shell=r.reduced(.8f);
+                g.setColour(juce::Colours::black.withAlpha(.86f));
+                g.fillRoundedRectangle(shell.expanded(1.5f),6.f);
+                g.setGradientFill(juce::ColourGradient(colour.darker(.22f),shell.getX(),shell.getY(),
+                                               colour.darker(.73f),shell.getRight(),shell.getBottom(),false));
+                g.fillRoundedRectangle(shell,5.5f);
+                g.setColour(colour.brighter(.35f).withAlpha(.88f));
+                g.drawRoundedRectangle(shell.reduced(.5f),5.f,1.1f);
+                g.setColour(juce::Colours::white.withAlpha(.14f));
+                g.drawLine(shell.getX()+12.f,shell.getY()+2.f,shell.getRight()-12.f,shell.getY()+2.f,.75f);
+                g.setColour(juce::Colours::black.withAlpha(.40f));
+                g.drawRoundedRectangle(shell.reduced(4.f),4.f,.65f);
+
+                // A subdued glass display, not a generated image of a nonexistent plugin.
+                // A genuine editor snapshot, if captured, is letterboxed with original ratio.
+                const auto rack=juce::Rectangle<float>(r.getX()+67.f,r.getY()+49.f,
+                                                       r.getWidth()-81.f,r.getHeight()-61.f);
+                g.setColour(juce::Colours::black.withAlpha(.70f));
+                g.fillRoundedRectangle(rack.expanded(2.f),3.5f);
+                g.setGradientFill(juce::ColourGradient(juce::Colour(0xff111517),rack.getX(),rack.getY(),
+                                                juce::Colour(0xff080a0c),rack.getRight(),rack.getBottom(),false));
+                g.fillRoundedRectangle(rack,3.f);
+                if(loaded && pluginSnapshots[(size_t)i].isValid()){
                     const auto& snapshot=pluginSnapshots[(size_t)i];
-                    // Keep the original proportions; black letterboxing instead of stretching.
-                    const float scale=juce::jmin(rack.getWidth()/snapshot.getWidth(),rack.getHeight()/snapshot.getHeight());
+                    const float scale=juce::jmin((rack.getWidth()-10.f)/snapshot.getWidth(),
+                                                  (rack.getHeight()-10.f)/snapshot.getHeight());
                     const int dw=juce::jmax(1,(int)std::round(snapshot.getWidth()*scale));
                     const int dh=juce::jmax(1,(int)std::round(snapshot.getHeight()*scale));
-                    g.drawImage(snapshot,(int)(rack.getCentreX()-dw*.5f),(int)(rack.getCentreY()-dh*.5f),dw,dh,
+                    g.drawImage(snapshot,(int)(rack.getCentreX()-dw*.5f),
+                                (int)(rack.getCentreY()-dh*.5f),dw,dh,
                                 0,0,snapshot.getWidth(),snapshot.getHeight());
-                } else if(loaded) {
-                    // Static visual fallback: keyed to the actual installed plugin name.
-                    g.setGradientFill(juce::ColourGradient(color.darker(.68f),rack.getX(),rack.getY(),
-                                        juce::Colour(0xff151a1b),rack.getRight(),rack.getBottom(),false));
-                    g.fillRoundedRectangle(rack,3.f);
-                    g.setColour(color.brighter(.45f).withAlpha(.65f));
-                    const float baseline=rack.getBottom()-11.f;
-                    for(int k=0;k<24;++k){
-                        const float a=std::sin(k*.7f+ix*.8f)*std::cos(k*.33f);
-                        const float height=6.f+std::abs(a)*25.f;
-                        g.drawLine(rack.getX()+7.f+k*(rack.getWidth()-14.f)/24.f,baseline,
-                                   rack.getX()+7.f+k*(rack.getWidth()-14.f)/24.f,baseline-height,1.3f);
-                    }
-                    g.setColour(juce::Colour(0xff0a0b0c).withAlpha(.79f));
-                    g.fillRoundedRectangle(juce::Rectangle<float>(rack.getX()+5.f,rack.getY()+5.f,rack.getWidth()-10.f,21.f),2.f);
-                    g.setColour(kText);g.setFont(juce::Font(juce::FontOptions(10.5f,juce::Font::bold)));
+                }else if(loaded){
+                    const auto margin=juce::jmin(14.f,rack.getHeight()*.18f);
+                    g.setColour(colour.brighter(.55f).withAlpha(.64f));
+                    g.fillRoundedRectangle(juce::Rectangle<float>(rack.getX()+8.f,rack.getY()+margin,
+                                      3.f,rack.getHeight()-2.f*margin),1.5f);
+                    g.setColour(kText);
+                    g.setFont(juce::Font(juce::FontOptions(13.f,juce::Font::bold)));
                     g.drawFittedText(owner.vstChain.name(i),
-                                     juce::Rectangle<int>((int)rack.getX()+9,(int)rack.getY()+5,(int)rack.getWidth()-18,20),
-                                     juce::Justification::centred,1,.6f);
-                } else {
-                    g.setGradientFill(juce::ColourGradient(juce::Colour(0xff383b3b),rack.getX(),rack.getY(),
-                                        juce::Colour(0xff101313),rack.getRight(),rack.getBottom(),false));
-                    g.fillRoundedRectangle(rack,3.f);
-                    drawGrille(g,rack.reduced(9.f,13.f),color);
-                    g.setColour(kMuted.withAlpha(.65f));
-                    g.setFont(juce::Font(juce::FontOptions(10.f,juce::Font::bold)));
-                    g.drawFittedText("SLOT LIBERO",rack.toNearestInt(),juce::Justification::centred,1,.75f);
+                         juce::Rectangle<int>((int)rack.getX()+18,(int)rack.getY()+7,
+                                              (int)rack.getWidth()-27,(int)rack.getHeight()-24),
+                         juce::Justification::centred,2,.75f);
+                    g.setColour(kMuted.withAlpha(.72f));
+                    g.setFont(juce::Font(juce::FontOptions(9.f)));
+                    g.drawFittedText("VST3  /  CLICCA PER APRIRE",
+                         juce::Rectangle<int>((int)rack.getX()+12,(int)rack.getBottom()-20,
+                                              (int)rack.getWidth()-24,14),
+                         juce::Justification::centred,1,.7f);
+                }else{
+                    drawGrille(g,rack.reduced(9.f,12.f),colour);
+                    g.setColour(juce::Colour(0xffadb5b5).withAlpha(.68f));
+                    g.setFont(juce::Font(juce::FontOptions(10.2f,juce::Font::bold)));
+                    g.drawFittedText("SLOT LIBERO",rack.toNearestInt().reduced(9,5),
+                                     juce::Justification::centred,1,.8f);
                 }
-                g.setColour(juce::Colour(0xff7e7d76));g.drawRoundedRectangle(rack,3.f,1.f);
-                drawHardwareScrew(g,rack.getX()+5.f,rack.getY()+5.f,2.8f);
-                drawHardwareScrew(g,rack.getRight()-5.f,rack.getY()+5.f,2.8f);
-                const float footX=r.getX()+35.f, footY=r.getY()+92.f;
-                g.setGradientFill(juce::ColourGradient(juce::Colour(0xffb9b4a9),footX-13,footY-13,
-                                                       juce::Colour(0xff252729),footX+13,footY+13,false));
+                g.setColour(juce::Colour(0xff93918b).withAlpha(.75f));
+                g.drawRoundedRectangle(rack.reduced(.5f),3.f,1.f);
+                // Dedicated footswitch LED and mechanical actuator. Only this toggles bypass.
+                const float footX=r.getX()+35.f,footY=r.getY()+99.f;
+                g.setGradientFill(juce::ColourGradient(juce::Colour(0xffbdb9ac),footX-13.f,footY-13.f,
+                                                       juce::Colour(0xff202427),footX+13.f,footY+13.f,false));
                 g.fillEllipse(footX-15.f,footY-15.f,30.f,30.f);
-                g.setColour(juce::Colours::black);g.drawEllipse(footX-15.f,footY-15.f,30.f,30.f,1.5f);
-                g.setColour(enabled?kAccent:juce::Colour(0xff55443b));
-                g.fillEllipse(r.getX()+14.f,r.getY()+46.f,7.f,7.f);
-                g.setColour(enabled?kAccent.withAlpha(.65f):kMuted.withAlpha(.2f));
-                g.drawEllipse(r.getX()+11.5f,r.getY()+43.5f,12.f,12.f,1.6f);
+                g.setColour(juce::Colour(0xff151617));g.drawEllipse(footX-15.f,footY-15.f,30.f,30.f,1.6f);
+                g.setColour(juce::Colour(0xff202628));g.fillEllipse(footX-8.f,footY-8.f,16.f,16.f);
+                const float ledX=r.getX()+35.f,ledY=r.getY()+53.f;
+                g.setColour((enabled?kAccent:juce::Colour(0xff55342f)).withAlpha(.21f));
+                g.fillEllipse(ledX-11.f,ledY-11.f,22.f,22.f);
+                g.setColour(enabled?juce::Colour(0xffff6644):juce::Colour(0xff61312d));
+                g.fillEllipse(ledX-5.f,ledY-5.f,10.f,10.f);
+                g.setColour(juce::Colour(0xfff3c6ae).withAlpha(enabled?.84f:.23f));
+                g.drawEllipse(ledX-5.f,ledY-5.f,10.f,10.f,1.f);
                 for(float xx:{r.getX()+7.f,r.getRight()-7.f})
-                    for(float yy:{r.getY()+7.f,r.getBottom()-7.f})drawHardwareScrew(g,xx,yy,3.2f);
-                g.setColour(juce::Colours::white.withAlpha(.22f));
-                g.drawLine(r.getX()+15.f,r.getY()+3.f,r.getRight()-15.f,r.getY()+3.f,1.f);
-                // Extra hardware highlights: amber power aura and lower rack edging.
-                g.setColour(enabled ? color.brighter(.35f).withAlpha(.16f) : juce::Colours::black.withAlpha(.14f));
-                g.drawRoundedRectangle(r.expanded(1.5f),8.f,2.3f);
-                g.setColour(juce::Colours::black.withAlpha(.48f));
-                g.drawLine(r.getX()+12.f,r.getBottom()-33.f,r.getRight()-12.f,r.getBottom()-33.f,1.f);
+                    for(float yy:{r.getY()+7.f,r.getBottom()-7.f})drawHardwareScrew(g,xx,yy,3.25f);
             }
             // Visual arrows mark processing direction; ordering is the actual engine order.
             for(int i=0;i<5;++i){
@@ -1309,18 +1360,23 @@ private:
             prevNam.setBounds(nam.getX(),y+160,36,31);
             nextNam.setBounds(nam.getX()+42,y+160,36,31);
             loadNam.setBounds(nam.getX()+84,y+160,nam.getWidth()-84,31);
-            loadIr.setBounds(nam.getX(),y+223,nam.getWidth(),36);
-            irName.setBounds(nam.getX(),y+265,nam.getWidth(),28);
-            namInputHeading.setBounds(nam.getX(),y+507,nam.getWidth(),20);
-            namGains[0].setBounds(nam.getX(),y+532,nam.getWidth(),43);
-            namOutputHeading.setBounds(nam.getX(),y+598,nam.getWidth(),20);
-            namGains[1].setBounds(nam.getX(),y+623,nam.getWidth(),43);
+            const int namGap=10;
+            const int namCol=(nam.getWidth()-namGap)/2;
+            namInputHeading.setBounds(nam.getX(),y+210,namCol,20);
+            namOutputHeading.setBounds(nam.getX()+namCol+namGap,y+210,namCol,20);
+            namInputHeading.setJustificationType(juce::Justification::centred);
+            namOutputHeading.setJustificationType(juce::Justification::centred);
+            namGains[0].setBounds(nam.getX(),y+234,namCol,117);
+            namGains[1].setBounds(nam.getX()+namCol+namGap,y+234,namCol,117);
+            loadIr.setBounds(nam.getX(),y+365,nam.getWidth(),36);
+            irName.setBounds(nam.getX(),y+413,nam.getWidth(),28);
             const int top=y+67, usable=h-85, rowH=(usable-24)/4;
             for(int k=0;k<4;++k){
                 layoutSlot(k,{pre.getX(),top+k*(rowH+8),pre.getWidth(),rowH});
                 layoutSlot(5+k,{post.getX(),top+k*(rowH+8),post.getWidth(),rowH});
             }
             sculptName.setBounds(sculpt.getX(),y+73,sculpt.getWidth(),31);
+            sculptFaceButton.setBounds(sculpt.getX()+14,y+169,sculpt.getWidth()-28,57);
             layoutSlot(4,{sculpt.getX(),y+90,sculpt.getWidth(),128});
             sculptHeading.setBounds(sculpt.getX(),y+240,sculpt.getWidth(),23);
             const int knobW=(sculpt.getWidth()-14)/2;
@@ -1388,33 +1444,25 @@ private:
         void layoutSlot(int index,juce::Rectangle<int> r){
             slotRects[(size_t)index]=r;
             const int x=r.getX()+10,y=r.getY()+7,w=r.getWidth()-20;
-            if(index == VstChain::sculptSlot){
-                slotNames[(size_t)index].setBounds(0,0,0,0);
-                // The fixed Sculpt module uses only a small load control when missing;
-                // no duplicate slot selector is drawn over its front plate.
+            if(index==VstChain::sculptSlot){
                 const bool missing=owner.vstChain.get(index)==nullptr;
-                slotMenus[(size_t)index].setBounds(x,y+2,w,missing?28:0);
+                slotNames[(size_t)index].setBounds(0,0,0,0);
+                slotMenus[(size_t)index].setBounds(x,y+27,w,missing?28:0);
                 slotMenus[(size_t)index].setVisible(missing);
                 slotStatus[(size_t)index].setBounds(0,0,0,0);
-                editors[(size_t)index].setBounds(x,y+43,w,25);
-                editors[(size_t)index].setVisible(!missing);
-                power[(size_t)index].setBounds(0,0,0,0);
-                clearButtons[(size_t)index].setBounds(0,0,0,0);
+                clearButtons[(size_t)index].setVisible(false);
                 footswitches[(size_t)index].setBounds(0,0,0,0);
                 previewButtons[(size_t)index].setBounds(0,0,0,0);
                 return;
             }
-            slotNames[(size_t)index].setBounds(x,y,w-20,20);
-            slotMenus[(size_t)index].setBounds(x+66,y+1,w-66,30);
-            slotStatus[(size_t)index].setBounds(x+65,r.getY()+114,w-69,16);
-            footswitches[(size_t)index].setBounds(r.getX()+20,r.getY()+77,30,30);
-            previewButtons[(size_t)index].setBounds(r.getX()+66,r.getY()+52,
-                                            juce::jmax(10,r.getWidth()-78),61);
-            const int rowBottom=r.getBottom()-33;
-            const int small=juce::jmax(43,(w-16)/3);
-            editors[(size_t)index].setBounds(x,rowBottom,small,27);
-            power[(size_t)index].setBounds(x+small+5,rowBottom,small+7,27);
-            clearButtons[(size_t)index].setBounds(x+w-32,rowBottom,32,27);
+            slotNames[(size_t)index].setBounds(x,y,65,27);
+            slotMenus[(size_t)index].setBounds(x+65,y,juce::jmax(35,w-104),30);
+            slotStatus[(size_t)index].setBounds(0,0,0,0);
+            footswitches[(size_t)index].setBounds(r.getX()+20,r.getY()+84,30,30);
+            // Full-pedal hit area; it is behind picker/footswitch/X in z-order.
+            previewButtons[(size_t)index].setBounds(r.reduced(4));
+            previewButtons[(size_t)index].toBack();
+            clearButtons[(size_t)index].setBounds(r.getRight()-34,r.getY()+9,24,24);
         }
         void openToneSearch(){
             owner.tone3000Query.setText(toneQuery.getText(),juce::dontSendNotification);
@@ -1537,18 +1585,12 @@ private:
                     (i==VstChain::sculptSlot?"CARICA SCULPT CH...":"Scegli VST3...");
                 if(slotMenus[(size_t)i].getButtonText()!=selectorText)
                     slotMenus[(size_t)i].setButtonText(selectorText);
-                editors[(size_t)i].setEnabled(name.isNotEmpty());
-                power[(size_t)i].setEnabled(i != VstChain::sculptSlot && name.isNotEmpty());
                 clearButtons[(size_t)i].setEnabled(i != VstChain::sculptSlot && name.isNotEmpty());
-                power[(size_t)i].setButtonText("BYPASS");
-                power[(size_t)i].setTooltip(owner.vstChain.enabled(i)?
-                    "Effetto attivo. Clicca per bypassare.":"Effetto bypassato. Clicca per riattivare.");
-                power[(size_t)i].setToggleState(owner.vstChain.enabled(i),juce::dontSendNotification);
                 if (i == VstChain::sculptSlot) {
-                    power[(size_t)i].setVisible(false);clearButtons[(size_t)i].setVisible(false);
+                    clearButtons[(size_t)i].setVisible(false);
                     const bool missing=name.isEmpty();
                     slotMenus[(size_t)i].setVisible(missing);
-                    editors[(size_t)i].setVisible(!missing);
+
                 }
             }
             updatingKnobs=true;
@@ -1601,7 +1643,8 @@ private:
         juce::ComboBox namPicker;
         std::array<juce::Label,9> slotNames,slotStatus;
         std::array<juce::TextButton,9> slotMenus;
-        std::array<juce::TextButton,9> editors,power,clearButtons;
+        std::array<juce::TextButton,9> clearButtons;
+        InvisibleButton sculptFaceButton;
         std::array<InvisibleButton,9> footswitches,previewButtons;
         std::array<juce::Slider,5> knobs;
         std::array<juce::Label,5> knobLabels,knobValues;
